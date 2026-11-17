@@ -14,6 +14,9 @@ if not BOT_TOKEN or not API_KEY:
 bot = telebot.TeleBot(BOT_TOKEN)
 client = Groq(api_key=API_KEY)
 
+# 🔑 Сюда впиши свой Telegram ID (или ID администраторов ресепшена) числами через запятую
+ADMIN_IDS = [6849157753]  # <-- ОБЯЗАТЕЛЬНО ЗАМЕНИ СВОИМ ID (можно узнать у @userinfobot)
+
 
 # Режимы общения и полная база знаний клиники для ИИ
 MODES = {
