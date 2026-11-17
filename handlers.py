@@ -5,10 +5,11 @@ import docx
 from config import bot, client, MODES, user_histories, user_modes, ADMIN_IDS
 from ai_service import ask_ai, ask_ai_with_vision
 from utils import get_keyboard, send_long_message, send_smart_reply, make_py_file
-from dental_data import CLINIC_INFO, SERVICES_TEXT, DOCTORS, BOOKED_SLOTS, ACTIVE_BOOKINGS
+from dental_data import CLINIC_INFO, SERVICES_TEXT, DOCTORS
+from database import add_booking, remove_booking_by_id, is_slot_booked, get_all_bookings, get_user_bookings  # Импорт новых функций БД
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
-# Временное хранилище записей пациентов (в памяти бота)
+# Временное хранилище шагов выбора врача/времени в памяти (остается для диалога)
 appointments_storage = {}
 
 
@@ -63,11 +64,12 @@ def handle_mode_switch(message):
     chat_id = message.chat.id
     user_modes[chat_id] = message.text
 
-    # После выбора роли показываем главное меню клиники (включая кнопку «📅 Записаться»)
+    # После выбора роли показываем главное меню клиники (включая кнопку «📅 Записаться» и «📋 Мои записи»)
     menu_markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     menu_markup.add(
         KeyboardButton("🩺 Услуги"),
         KeyboardButton("📅 Записаться"),
+        KeyboardButton("📋 Мои записи"),
         KeyboardButton("📍 Адрес"),
         KeyboardButton("🕒 График работы"),
         KeyboardButton("🔄 Сменить роль")
@@ -79,6 +81,32 @@ def handle_mode_switch(message):
         parse_mode="HTML",
         reply_markup=menu_markup
     )
+
+
+# Обработка кнопки «📋 Мои записи» (показывает все активные записи пользователя)
+@bot.message_handler(func=lambda msg: msg.text == "📋 Мои записи")
+def handle_my_appointments(message):
+    if not check_mode_selected(message):
+        return
+
+    chat_id = message.chat.id
+    user_bookings = get_user_bookings(chat_id)
+
+    if not user_bookings:
+        bot.reply_to(
+            message,
+            "📭 У вас пока нет активных записей на прием.\n\nВы можете записаться через кнопку «📅 Записаться» в меню.",
+            parse_mode="HTML"
+        )
+        return
+
+    text = "📋 <b>Ваши активные записи в клинику:</b>\n\n"
+    for idx, (booking_id, doctor, time_slot) in enumerate(user_bookings, 1):
+        text += f"{idx}. 👨‍⚕️ Врач: <b>{doctor}</b> | 🕒 Время: <b>{time_slot}</b>\n"
+
+    text += "\n📍 Адрес: г. Алматы, ул. Абая 150 (угол ул. Сатпаева)\nЖдем вас!"
+
+    bot.reply_to(message, text, parse_mode="HTML")
 
 
 @bot.message_handler(func=lambda msg: msg.text == "🔄 Сменить роль")
@@ -159,11 +187,11 @@ def callback_choose_doctor(call):
 
     markup = InlineKeyboardMarkup(row_width=2)
 
-    # Динамически фильтруем слоты: показываем только те, которые НЕ заняты
+    # Динамически фильтруем слоты через базу данных: показываем только те, которые НЕ заняты
     available_slots_found = False
     for time_slot in doc["slots"]:
-        if (doc["name"], time_slot) in BOOKED_SLOTS:
-            continue  # Пропускаем уже занятое время
+        if is_slot_booked(doc["name"], time_slot):
+            continue  # Пропускаем уже занятое время из БД
 
         available_slots_found = True
         markup.add(InlineKeyboardButton(f"🕒 {time_slot}", callback_data=f"time_{doc_id}_{time_slot}"))
@@ -185,23 +213,21 @@ def callback_choose_doctor(call):
     )
 
 
-# Обработка выбора времени приема с защитой от двойного бронирования (Double Booking)
+# Обработка выбора времени приема с защитой от двойного бронирования в базе данных
 @bot.callback_query_handler(func=lambda call: call.data.startswith("time_"))
 def callback_choose_time(call):
     chat_id = call.message.chat.id
-    user = call.from_user  # Получаем данные о пользователе, который жмет на кнопку
+    user = call.from_user  # Получаем данные о пользователе
 
     parts = call.data.split("_")
     time_slot = parts[-1]  # Время (например, "10:00")
 
     doc_name = appointments_storage.get(chat_id, {}).get("doctor", "Врач")
 
-    if (doc_name, time_slot) in BOOKED_SLOTS:
+    # Проверка по БД на случай, если слот заняли секунду назад
+    if is_slot_booked(doc_name, time_slot):
         bot.answer_callback_query(call.id, "⚠️ Упс! Это время только что заняли. Выберите другое.", show_alert=True)
         return
-
-    # Сохраняем слот и ИМЯ/ЮЗЕРНЕЙМ пользователя для ресепшена
-    BOOKED_SLOTS.add((doc_name, time_slot))
 
     # Формируем красивое имя для отображения
     user_fullname = user.first_name or "Без имени"
@@ -210,11 +236,8 @@ def callback_choose_time(call):
     else:
         user_display = f"{user_fullname} (ID: {user.id})"
 
-    ACTIVE_BOOKINGS[chat_id] = {
-        "doctor": doc_name,
-        "time": time_slot,
-        "patient": user_display  # Сохраняем информацию о пациенте
-    }
+    # Сохраняем запись в базу данных (теперь создается новая строка, старые не затираются)
+    add_booking(chat_id, doc_name, time_slot, user_display)
 
     if chat_id in appointments_storage:
         appointments_storage[chat_id]["time"] = time_slot
@@ -224,7 +247,7 @@ def callback_choose_time(call):
         f"📍 Клиника: г. Алматы, ул. Абая 150 (угол ул. Сатпаева).\n"
         f"👨‍⚕️ Врач: <b>{doc_name}</b>\n"
         f"🕒 Время: <b>{time_slot}</b>\n\n"
-        "Мы ждем вас! Если вы захотите отменить визит, пожалуйста, свяжитесь с нашим администратором по телефону."
+        "Мы ждем вас! Если вы захотите отменить визит, пожалуйста, воспользуйтесь кнопкой «Мои записи» или свяжитесь с администратором."
     )
 
     bot.edit_message_text(
@@ -271,7 +294,7 @@ def handle_work_hours(message):
     bot.reply_to(message, CLINIC_INFO['work_hours'])
 
 
-# Команда для панели администратора (ресепшена)
+# Команда для панели администратора (ресепшена) — читает из базы данных SQLite
 @bot.message_handler(commands=["admin"])
 def handle_admin_panel(message):
     chat_id = message.chat.id
@@ -280,7 +303,9 @@ def handle_admin_panel(message):
         bot.reply_to(message, "⛔ У вас нет доступа к панели администратора.")
         return
 
-    if not ACTIVE_BOOKINGS:
+    active_bookings = get_all_bookings()  # Достаем все записи из постоянной БД по их id
+
+    if not active_bookings:
         bot.reply_to(message, "📋 <b>Панель управления ресепшена:</b>\n\nВ данный момент активных записей нет.",
                      parse_mode="HTML")
         return
@@ -288,21 +313,20 @@ def handle_admin_panel(message):
     markup = InlineKeyboardMarkup(row_width=1)
     text = "📋 <b>Панель ресепшена: Активные записи пациентов</b>\n\nНажмите на запись, чтобы отменить её и освободить слот:\n"
 
-    for user_id, booking in ACTIVE_BOOKINGS.items():
+    for booking_id, booking in active_bookings.items():
         doctor = booking["doctor"]
         time_slot = booking["time"]
-        patient_info = booking.get("patient", "Пациент")  # Достаем имя/юзернейм
+        patient_info = booking.get("patient", "Пациент")
 
-        # Теперь кнопка и текст содержат имя того, кто записался!
-        text += f"\n👤 <b>{patient_info}</b>\n👨‍⚕️ {doctor} 🕒 <b>{time_slot}</b>\n"
+        text += f"\n🆔 [Запись #{booking_id}] 👤 <b>{patient_info}</b>\n👨‍⚕️ {doctor} 🕒 <b>{time_slot}</b>\n"
 
-        btn_text = f"❌ Отменить: {patient_info[:15]}... ({time_slot})"
-        markup.add(InlineKeyboardButton(btn_text, callback_data=f"adm_cancel_{user_id}"))
+        btn_text = f"❌ Отменить (#{booking_id}): {patient_info[:10]}... ({time_slot})"
+        markup.add(InlineKeyboardButton(btn_text, callback_data=f"adm_cancel_{booking_id}"))
 
     bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
 
 
-# Обработка отмены записи со стороны администратора (ресепшена)
+# Обработка отмены записи со стороны администратора (удаляет конкретную бронь по ее ID)
 @bot.callback_query_handler(func=lambda call: call.data.startswith("adm_cancel_"))
 def callback_admin_cancel(call):
     admin_chat_id = call.message.chat.id
@@ -311,38 +335,27 @@ def callback_admin_cancel(call):
         bot.answer_callback_query(call.id, "⛔ Недостаточно прав.", show_alert=True)
         return
 
-    target_user_id = int(call.data.replace("adm_cancel_", ""))
+    # Достаем уникальный ID конкретной записи из callback_data
+    booking_id = int(call.data.replace("adm_cancel_", ""))
 
-    if target_user_id not in ACTIVE_BOOKINGS:
-        bot.answer_callback_query(call.id, "⚠️ Эта запись уже удалена или не существует.", show_alert=True)
+    # Удаляем запись по ее ID и автоматически освобождаем слот в расписании!
+    removed_data = remove_booking_by_id(booking_id)
+
+    if not removed_data:
+        bot.answer_callback_query(call.id, "⚠️ Эта запись уже была удалена или не существует.", show_alert=True)
         return
 
-    booking = ACTIVE_BOOKINGS.pop(target_user_id)
-    doctor = booking["doctor"]
-    time_slot = booking["time"]
-
-    # Возвращаем слот в расписание
-    if (doctor, time_slot) in BOOKED_SLOTS:
-        BOOKED_SLOTS.remove((doctor, time_slot))
+    doctor = removed_data["doctor"]
+    time_slot = removed_data["time"]
 
     bot.answer_callback_query(call.id, "✅ Запись отменена, слот снова свободен!")
 
     bot.edit_message_text(
         chat_id=admin_chat_id,
         message_id=call.message.message_id,
-        text=f"✅ Запись к врачу <b>{doctor}</b> на <b>{time_slot}</b> успешно отменена администратором. Слот освобожден в расписании.",
+        text=f"✅ Запись #{booking_id} к врачу <b>{doctor}</b> на <b>{time_slot}</b> успешно отменена администратором. Слот освобожден.",
         parse_mode="HTML"
     )
-
-    # Опционально уведомляем самого пациента об отмене администратором
-    try:
-        bot.send_message(
-            target_user_id,
-            f"ℹ️ Уважаемый пациент, ваша запись к врачу <b>{doctor}</b> на <b>{time_slot}</b> была отменена администратором клиники.",
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        print(f"Не удалось отправить уведомление пользователю: {e}")
 
 
 # Обработка обычных текстовых вопросов к ИИ (калькулятор цен, консультации и т.д.)
@@ -354,7 +367,6 @@ def handle_text(message):
     chat_id = message.chat.id
     bot.send_chat_action(chat_id, "typing")
 
-    # Отправляем запрос ИИ с учетом ролей (Администратор или Врач знает цены в тенге и адрес в Алматы)
     reply = ask_ai(chat_id, message.text)
     send_smart_reply(message, reply)
 
@@ -370,16 +382,13 @@ def handle_voice(message):
     temp_path = None
 
     try:
-        # Скачиваем голосовой файл из Telegram
         file_info = bot.get_file(message.voice.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
 
-        # Сохраняем во временный .ogg файл
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as temp_audio:
             temp_audio.write(downloaded_file)
             temp_path = temp_audio.name
 
-        # Отправляем в Whisper API для распознавания речи
         with open(temp_path, "rb") as audio_file:
             transcription = client.audio.transcriptions.create(
                 file=(os.path.basename(temp_path), audio_file.read()),
@@ -392,11 +401,9 @@ def handle_voice(message):
                          "Не удалось разобрать слова в голосовом сообщении 🤷‍♂️ Попробуйте еще раз или напишите текстом.")
             return
 
-        # Показываем пользователю, что именно бот услышал
         bot.reply_to(message, f"🎤 _Вы сказали:_ «{recognized_text}»", parse_mode="Markdown")
         bot.send_chat_action(chat_id, "typing")
 
-        # Отправляем распознанный текст нашей ИИ-модели (Администратору или Врачу)
         reply = ask_ai(chat_id, recognized_text)
         send_smart_reply(message, reply)
 
@@ -404,6 +411,5 @@ def handle_voice(message):
         print(f"❌ Ошибка обработки голосового: {e}")
         bot.reply_to(message, "⚠️ Не получилось обработать голосовое сообщение. Попробуйте написать текстом.")
     finally:
-        # Очищаем за собой временный файл
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)

@@ -3,8 +3,12 @@ from config import bot
 from ai_service import MODELS
 import handlers  # Импортируем хендлеры, чтобы телебот подцепил все декораторы
 from telebot.types import BotCommand
+from database import init_db  # Импортируем функцию инициализации базы данных
 
 if __name__ == "__main__":
+    # Инициализируем SQLite базу данных перед запуском бота (создаст таблицы, если их нет)
+    init_db()
+
     bot.remove_webhook()
 
     bot.set_my_commands([
@@ -13,7 +17,7 @@ if __name__ == "__main__":
     ])
 
     print(f"🤖 Найдены актуальные модели: {MODELS}")
-    print("✅ Бот успешно запущен в PyCharm и ждёт сообщений!")
+    print("✅ Бот успешно запущен в PyCharm, подключен к SQLite и ждёт сообщений!")
 
     # Бесконечный цикл с автопереподключением при потере связи с Telegram
     while True:
