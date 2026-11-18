@@ -8,6 +8,8 @@ from database import init_db  # Импортируем функцию иници
 if __name__ == "__main__":
     # Инициализируем SQLite базу данных перед запуском бота (создаст таблицы, если их нет)
     init_db()
+    # Обращаемся к handlers, чтобы PyCharm не считал импорт неиспользуемым
+    print(f"📦 Модуль хендлеров загружен: {handlers.__name__}")
 
     bot.remove_webhook()
 

@@ -1,7 +1,7 @@
 import os
-from dotenv import load_dotenv
 import telebot
 from groq import Groq
+from dotenv import load_dotenv
 
 # Загружаем ключи из файла .env
 load_dotenv()
@@ -9,13 +9,14 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("API_KEY")
 
 if not BOT_TOKEN or not API_KEY:
-    raise ValueError("❌ Ошибка! Проверь файл .env — не найдены BOT_TOKEN или API_KEY.")
+    raise ValueError("❌ Ошибка! Проверь файл — не найдены BOT_TOKEN или API_KEY в переменной окружения .env.")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 client = Groq(api_key=API_KEY)
 
-# 🔑 Сюда впиши свой Telegram ID (или ID администраторов ресепшена) числами через запятую
-ADMIN_IDS = [6849157753]  # <-- ОБЯЗАТЕЛЬНО ЗАМЕНИ СВОИМ ID (можно узнать у @userinfobot)
+# 🔑 Считываем ID администраторов из .env (поддерживает несколько через запятую)
+admin_ids_raw = os.getenv("ADMIN_IDS", "6849157753")
+ADMIN_IDS = [int(admin_id.strip()) for admin_id in admin_ids_raw.split(",") if admin_id.strip().isdigit()]
 
 
 # Режимы общения и полная база знаний клиники для ИИ

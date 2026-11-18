@@ -34,3 +34,25 @@ def send_smart_reply(message, text):
             bot.reply_to(message, chunk, parse_mode="Markdown")
         except Exception:
             bot.reply_to(message, chunk)
+
+
+from config import bot
+
+
+def notify_all_admins(text, parse_mode="HTML"):
+    """
+    Надежная рассылка уведомлений всем администраторам из ADMIN_IDS.
+    Защищена от падения, если один из админов заблокировал бота или удалил чат.
+    """
+    from config import ADMIN_IDS  # Импортируем актуальный список ID
+
+    if not ADMIN_IDS:
+        print("⚠️ Предупреждение: список ADMIN_IDS пуст, некому отправлять уведомления!")
+        return
+
+    for admin_id in ADMIN_IDS:
+        try:
+            bot.send_message(admin_id, text, parse_mode=parse_mode)
+        except Exception as e:
+            # Профессиональный перехват ошибок: логгируем, но не даем циклу упасть
+            print(f"⚠️ Не удалось отправить уведомление администратору {admin_id}: {e}")
