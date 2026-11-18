@@ -1,96 +1,83 @@
-import sqlite3
+import aiosqlite
 
 DB_NAME = "clinic.db"
 
 
-def init_db():
-    """Инициализация базы данных и создание таблиц, если их нет"""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+async def init_db():
+    """Асинхронная инициализация базы данных и создание таблиц, если их нет"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        # Таблица для активных записей пациентов (с колонкой phone)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS appointments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                doctor TEXT NOT NULL,
+                time_slot TEXT NOT NULL,
+                patient_info TEXT NOT NULL,
+                phone TEXT NOT NULL
+            )
+        """)
 
-    # Таблица для активных записей пациентов (теперь с колонкой phone)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS appointments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            doctor TEXT NOT NULL,
-            time_slot TEXT NOT NULL,
-            patient_info TEXT NOT NULL,
-            phone TEXT NOT NULL
-        )
-    """)
+        # Таблица для занятых слотов (для проверки двойного бронирования)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS booked_slots (
+                doctor TEXT NOT NULL,
+                time_slot TEXT NOT NULL,
+                PRIMARY KEY (doctor, time_slot)
+            )
+        """)
 
-    # Таблица для занятых слотов (чтобы проверять двойное бронирование)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS booked_slots (
-            doctor TEXT NOT NULL,
-            time_slot TEXT NOT NULL,
-            PRIMARY KEY (doctor, time_slot)
-        )
-    """)
-
-    conn.commit()
-    conn.close()
+        await db.commit()
 
 
-# Функции для работы с записями
-def add_booking(user_id, doctor, time_slot, patient_info, phone):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    try:
-        # Добавляем в список занятых слотов
-        cursor.execute("INSERT OR IGNORE INTO booked_slots (doctor, time_slot) VALUES (?, ?)", (doctor, time_slot))
-        # Добавляем новую запись вместе с номером телефона
-        cursor.execute(
-            "INSERT INTO appointments (user_id, doctor, time_slot, patient_info, phone) VALUES (?, ?, ?, ?, ?)",
-            (user_id, doctor, time_slot, patient_info, phone)
-        )
-        conn.commit()
-    except Exception as e:
-        print(f"Ошибка при добавлении в БД: {e}")
-    finally:
-        conn.close()
+# Асинхронные функции для работы с записями
+async def add_booking(user_id, doctor, time_slot, patient_info, phone):
+    async with aiosqlite.connect(DB_NAME) as db:
+        try:
+            # Добавляем в список занятых слотов
+            await db.execute("INSERT OR IGNORE INTO booked_slots (doctor, time_slot) VALUES (?, ?)", (doctor, time_slot))
+            # Добавляем новую запись вместе с номером телефона
+            await db.execute(
+                "INSERT INTO appointments (user_id, doctor, time_slot, patient_info, phone) VALUES (?, ?, ?, ?, ?)",
+                (user_id, doctor, time_slot, patient_info, phone)
+            )
+            await db.commit()
+        except Exception as e:
+            print(f"Ошибка при асинхронном добавлении в БД: {e}")
 
 
-def remove_booking_by_id(booking_id):
-    """Удаление конкретной записи по её уникальному ID"""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+async def remove_booking_by_id(booking_id):
+    """Асинхронное удаление конкретной записи по её уникальному ID"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        # Находим, какой слот занимала эта конкретная бронь, чтобы освободить его
+        async with db.execute("SELECT doctor, time_slot FROM appointments WHERE id = ?", (booking_id,)) as cursor:
+            row = await cursor.fetchone()
 
-    # Находим, какой слот занимала эта конкретная бронь, чтобы освободить его
-    cursor.execute("SELECT doctor, time_slot FROM appointments WHERE id = ?", (booking_id,))
-    row = cursor.fetchone()
+        booking_data = None
+        if row:
+            doctor, time_slot = row
+            booking_data = {"doctor": doctor, "time": time_slot}
+            # Удаляем из занятых слотов
+            await db.execute("DELETE FROM booked_slots WHERE doctor = ? AND time_slot = ?", (doctor, time_slot))
+            # Удаляем конкретную запись по её id
+            await db.execute("DELETE FROM appointments WHERE id = ?", (booking_id,))
+            await db.commit()
 
-    booking_data = None
-    if row:
-        doctor, time_slot = row
-        booking_data = {"doctor": doctor, "time": time_slot}
-        # Удаляем из занятых слотов
-        cursor.execute("DELETE FROM booked_slots WHERE doctor = ? AND time_slot = ?", (doctor, time_slot))
-        # Удаляем конкретную запись по её id
-        cursor.execute("DELETE FROM appointments WHERE id = ?", (booking_id,))
-        conn.commit()
-
-    conn.close()
-    return booking_data
+        return booking_data
 
 
-def is_slot_booked(doctor, time_slot):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM booked_slots WHERE doctor = ? AND time_slot = ?", (doctor, time_slot))
-    exists = cursor.fetchone() is not None
-    conn.close()
-    return exists
+async def is_slot_booked(doctor, time_slot):
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT 1 FROM booked_slots WHERE doctor = ? AND time_slot = ?", (doctor, time_slot)) as cursor:
+            exists = await cursor.fetchone() is not None
+        return exists
 
 
-def get_all_bookings():
+async def get_all_bookings():
     """Возвращает все записи в виде словаря {booking_id: {...}}"""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, user_id, doctor, time_slot, patient_info, phone FROM appointments")
-    rows = cursor.fetchall()
-    conn.close()
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT id, user_id, doctor, time_slot, patient_info, phone FROM appointments") as cursor:
+            rows = await cursor.fetchall()
 
     bookings = {}
     for row in rows:
@@ -105,11 +92,9 @@ def get_all_bookings():
     return bookings
 
 
-def get_user_bookings(user_id):
+async def get_user_bookings(user_id):
     """Возвращает список всех записей конкретного пользователя (включая телефон)"""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, doctor, time_slot, phone FROM appointments WHERE user_id = ?", (user_id,))
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT id, doctor, time_slot, phone FROM appointments WHERE user_id = ?", (user_id,)) as cursor:
+            rows = await cursor.fetchall()
+        return rows

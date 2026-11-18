@@ -1,6 +1,9 @@
-.env
-__pycache__/
+.venv/
 venv/
-*.docx
-*.log
-.idea/
+__pycache__/
+*.pyc
+.env
+chroma_db/
+*.db
+*.sqlite
+*.sqlite3

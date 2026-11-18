@@ -1,5 +1,6 @@
 import os
 import telebot
+from telebot.async_telebot import AsyncTeleBot  # <--- Импортируем асинхронный класс бота
 from groq import Groq
 from dotenv import load_dotenv
 
@@ -11,7 +12,8 @@ API_KEY = os.getenv("API_KEY")
 if not BOT_TOKEN or not API_KEY:
     raise ValueError("❌ Ошибка! Проверь файл — не найдены BOT_TOKEN или API_KEY в переменной окружения .env.")
 
-bot = telebot.TeleBot(BOT_TOKEN)
+# 🚀 Создаем асинхронного бота вместо синхронного TeleBot
+bot = AsyncTeleBot(BOT_TOKEN)
 client = Groq(api_key=API_KEY)
 
 # 🔑 Считываем ID администраторов из .env (поддерживает несколько через запятую)
