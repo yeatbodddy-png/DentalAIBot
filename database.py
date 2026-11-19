@@ -6,19 +6,28 @@ DB_NAME = "clinic.db"
 async def init_db():
     """Асинхронная инициализация базы данных и создание таблиц, если их нет"""
     async with aiosqlite.connect(DB_NAME) as db:
-        # Таблица для активных записей пациентов (с колонкой phone)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS appointments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 doctor TEXT NOT NULL,
                 time_slot TEXT NOT NULL,
+                appointment_dt TEXT,
                 patient_info TEXT NOT NULL,
-                phone TEXT NOT NULL
+                phone TEXT NOT NULL,
+                reminded_24h INTEGER NOT NULL DEFAULT 0
             )
         """)
 
-        # Таблица для занятых слотов (для проверки двойного бронирования)
+        # Безопасная миграция, если appointments уже существовала без новых колонок
+        async with db.execute("PRAGMA table_info(appointments)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+
+        if "appointment_dt" not in columns:
+            await db.execute("ALTER TABLE appointments ADD COLUMN appointment_dt TEXT")
+        if "reminded_24h" not in columns:
+            await db.execute("ALTER TABLE appointments ADD COLUMN reminded_24h INTEGER NOT NULL DEFAULT 0")
+
         await db.execute("""
             CREATE TABLE IF NOT EXISTS booked_slots (
                 doctor TEXT NOT NULL,
@@ -30,16 +39,19 @@ async def init_db():
         await db.commit()
 
 
-# Асинхронные функции для работы с записями
-async def add_booking(user_id, doctor, time_slot, patient_info, phone):
+async def add_booking(user_id, doctor, time_slot, patient_info, phone, appointment_dt=None):
     async with aiosqlite.connect(DB_NAME) as db:
         try:
-            # Добавляем в список занятых слотов
-            await db.execute("INSERT OR IGNORE INTO booked_slots (doctor, time_slot) VALUES (?, ?)", (doctor, time_slot))
-            # Добавляем новую запись вместе с номером телефона
             await db.execute(
-                "INSERT INTO appointments (user_id, doctor, time_slot, patient_info, phone) VALUES (?, ?, ?, ?, ?)",
-                (user_id, doctor, time_slot, patient_info, phone)
+                "INSERT OR IGNORE INTO booked_slots (doctor, time_slot) VALUES (?, ?)",
+                (doctor, time_slot)
+            )
+            await db.execute(
+                """
+                INSERT INTO appointments (user_id, doctor, time_slot, appointment_dt, patient_info, phone, reminded_24h)
+                VALUES (?, ?, ?, ?, ?, ?, 0)
+                """,
+                (user_id, doctor, time_slot, appointment_dt, patient_info, phone)
             )
             await db.commit()
         except Exception as e:
@@ -49,7 +61,6 @@ async def add_booking(user_id, doctor, time_slot, patient_info, phone):
 async def remove_booking_by_id(booking_id):
     """Асинхронное удаление конкретной записи по её уникальному ID"""
     async with aiosqlite.connect(DB_NAME) as db:
-        # Находим, какой слот занимала эта конкретная бронь, чтобы освободить его
         async with db.execute("SELECT doctor, time_slot FROM appointments WHERE id = ?", (booking_id,)) as cursor:
             row = await cursor.fetchone()
 
@@ -57,9 +68,7 @@ async def remove_booking_by_id(booking_id):
         if row:
             doctor, time_slot = row
             booking_data = {"doctor": doctor, "time": time_slot}
-            # Удаляем из занятых слотов
             await db.execute("DELETE FROM booked_slots WHERE doctor = ? AND time_slot = ?", (doctor, time_slot))
-            # Удаляем конкретную запись по её id
             await db.execute("DELETE FROM appointments WHERE id = ?", (booking_id,))
             await db.commit()
 
@@ -68,7 +77,10 @@ async def remove_booking_by_id(booking_id):
 
 async def is_slot_booked(doctor, time_slot):
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT 1 FROM booked_slots WHERE doctor = ? AND time_slot = ?", (doctor, time_slot)) as cursor:
+        async with db.execute(
+            "SELECT 1 FROM booked_slots WHERE doctor = ? AND time_slot = ?",
+            (doctor, time_slot)
+        ) as cursor:
             exists = await cursor.fetchone() is not None
         return exists
 
@@ -76,25 +88,55 @@ async def is_slot_booked(doctor, time_slot):
 async def get_all_bookings():
     """Возвращает все записи в виде словаря {booking_id: {...}}"""
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT id, user_id, doctor, time_slot, patient_info, phone FROM appointments") as cursor:
+        async with db.execute(
+            "SELECT id, user_id, doctor, time_slot, appointment_dt, patient_info, phone, reminded_24h FROM appointments"
+        ) as cursor:
             rows = await cursor.fetchall()
 
     bookings = {}
     for row in rows:
-        booking_id, user_id, doctor, time_slot, patient_info, phone = row
+        booking_id, user_id, doctor, time_slot, appointment_dt, patient_info, phone, reminded_24h = row
         bookings[booking_id] = {
             "user_id": user_id,
             "doctor": doctor,
             "time": time_slot,
+            "appointment_dt": appointment_dt,
             "patient": patient_info,
-            "phone": phone
+            "phone": phone,
+            "reminded_24h": reminded_24h,
         }
     return bookings
 
 
 async def get_user_bookings(user_id):
-    """Возвращает список всех записей конкретного пользователя (включая телефон)"""
+    """Возвращает список всех записей конкретного пользователя"""
     async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT id, doctor, time_slot, phone FROM appointments WHERE user_id = ?", (user_id,)) as cursor:
+        async with db.execute(
+            "SELECT id, doctor, time_slot, appointment_dt, phone FROM appointments WHERE user_id = ?",
+            (user_id,)
+        ) as cursor:
             rows = await cursor.fetchall()
         return rows
+
+
+async def get_pending_24h_bookings():
+    """Возвращает записи с указанной датой/временем, по которым ещё не отправлено напоминание за 24 часа"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(
+            """
+            SELECT id, user_id, doctor, time_slot, appointment_dt, phone
+            FROM appointments
+            WHERE reminded_24h = 0 AND appointment_dt IS NOT NULL
+            """
+        ) as cursor:
+            return await cursor.fetchall()
+
+
+async def mark_24h_reminded(booking_id):
+    """Помечает запись как напомненную за 24 часа"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "UPDATE appointments SET reminded_24h = 1 WHERE id = ?",
+            (booking_id,)
+        )
+        await db.commit()

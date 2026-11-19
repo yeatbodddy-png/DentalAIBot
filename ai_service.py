@@ -2,8 +2,9 @@ import asyncio
 from config import client, MODES, user_histories, user_modes
 from rag_service import init_vector_db, search_knowledge
 
-# Убрали вызов init_vector_db() из глобальной зоны, чтобы не морозить старт бота!
 _vector_db_initialized = False
+_warmup_done = False
+
 
 def ensure_vector_db():
     """Ленивая инициализация векторной базы без блокировки потока при импорте."""
@@ -43,37 +44,73 @@ def get_working_models():
         return []
 
 
-# 🚀 Загружаем модели сразу при импорте файла
 MODELS = get_working_models()
 
 
 async def initialize_ai_models():
-    """Асинхронная инициализация моделей для совместимости с main.py"""
+    """Асинхронная инициализация моделей при старте."""
     global MODELS
     if not MODELS:
         MODELS = get_working_models()
 
 
+async def warmup_ai_services():
+    """
+    Прогревает ChromaDB и эмбеддинги при старте бота, чтобы первый вопрос
+    пользователя не ждал холодной инициализации моделей и векторного индекса.
+    """
+    global _warmup_done
+    if _warmup_done:
+        return
+
+    loop = asyncio.get_running_loop()
+    try:
+        print("🔥 Прогреваем векторную базу и поисковый индекс...")
+        await asyncio.wait_for(loop.run_in_executor(None, ensure_vector_db), timeout=30)
+        await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: search_knowledge("стоматология прайс запись", n_results=1)),
+            timeout=10
+        )
+        _warmup_done = True
+        print("✅ Прогрев сервисов ИИ завершён — бот готов к быстрым ответам!")
+    except Exception as e:
+        print(f"⚠️ Прогрев прошёл с предупреждением (бот продолжит работу): {e}")
+
+
 async def ask_ai(chat_id, user_text):
-    """Асинхронный RAG-запрос в Groq: подтягивает релевантные данные из ChromaDB с учетом истории."""
+    """Асинхронный RAG-запрос в Groq с защитой от долгих зависаний и быстрым переключением моделей."""
+    if not MODELS:
+        await initialize_ai_models()
     if not MODELS:
         return "Не удалось загрузить список моделей Groq. Проверь интернет или API_KEY!"
 
-    # 🚀 Лениво инициализируем векторную базу при первом вопросе пользователя через отдельный поток
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, ensure_vector_db)
+
+    # На случай если warmup ещё не успел завершиться к первому сообщению
+    if not _vector_db_initialized:
+        try:
+            await asyncio.wait_for(loop.run_in_executor(None, ensure_vector_db), timeout=15)
+        except Exception as e:
+            print(f"⚠️ Пропускаем ожидание инициализации векторной базы: {e}")
 
     current_mode = user_modes.get(chat_id, "👩‍⚕️ Администратор")
     system_prompt = MODES.get(current_mode, list(MODES.values())[0])
 
-    # 🔍 ИЩЕМ РЕЛЕВАНТНЫЙ КОНТЕКСТ ЧЕРЕЗ ВЕКТОРНЫЙ ПОИСК RAG (тоже через поток, чтобы не фризить)
-    relevant_context = await loop.run_in_executor(None, lambda: search_knowledge(user_text, n_results=2))
+    relevant_context = ""
+    try:
+        relevant_context = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: search_knowledge(user_text, n_results=2)),
+            timeout=5
+        )
+    except Exception as e:
+        print(f"⚠️ RAG-поиск пропущен/замедлился: {e}")
 
-    # Добавляем найденные данные из векторной базы прямо в системный промпт
     enhanced_system_prompt = (
         f"{system_prompt}\n\n"
         f"📚 АКТУАЛЬНЫЕ ДАННЫЕ ИЗ БАЗЫ ЗНАНИЙ КЛИНИКИ ПО ЭТОМУ ВОПРОСУ:\n"
-        f"{relevant_context}"
+        f"{relevant_context}\n\n"
+        "🛑 Напоминание: не записывай через чат (только кнопка «📅 Записаться»), не выводи простыни со списком врачей "
+        "и слотов, не назначай скидки/подарки сам — направляй на ресепшн по номеру +7 (777) 123-45-67."
     )
 
     if chat_id not in user_histories:
@@ -85,9 +122,9 @@ async def ask_ai(chat_id, user_text):
     recent_history = history[-8:]
 
     messages_payload = (
-            [{"role": "system", "content": enhanced_system_prompt}]
-            + recent_history
-            + [{"role": "user", "content": user_text}]
+        [{"role": "system", "content": enhanced_system_prompt}]
+        + recent_history
+        + [{"role": "user", "content": user_text}]
     )
 
     last_error = None
@@ -95,14 +132,17 @@ async def ask_ai(chat_id, user_text):
     for model_name in MODELS:
         try:
             print(f"🚀 Пробуем отправить запрос в модель Groq: {model_name}")
-            completion = await loop.run_in_executor(
-                None,
-                lambda: client.chat.completions.create(
-                    model=model_name,
-                    messages=messages_payload,
-                    temperature=0.7,
-                    max_tokens=1000
-                )
+            completion = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda m=model_name: client.chat.completions.create(
+                        model=m,
+                        messages=messages_payload,
+                        temperature=0.7,
+                        max_tokens=1000
+                    )
+                ),
+                timeout=12
             )
             reply_text = completion.choices[0].message.content
             print(f"✅ Успешный ответ от модели {model_name}")
@@ -115,6 +155,10 @@ async def ask_ai(chat_id, user_text):
 
             return reply_text
 
+        except asyncio.TimeoutError:
+            print(f"⏱️ Модель {model_name} отвечала дольше 12 сек, пробуем следующую...")
+            last_error = TimeoutError(f"Timeout on {model_name}")
+            continue
         except Exception as e:
             print(f"⚠️ Модель {model_name} сбоит, пробуем следующую... Ошибка: {e}")
             last_error = e
@@ -131,34 +175,37 @@ async def ask_ai_with_vision(chat_id, user_prompt, base64_image):
         system_prompt = MODES.get(current_mode, list(MODES.values())[0])
 
         loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: client.chat.completions.create(
-                model="qwen/qwen2.5-vl-7b-instruct",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": system_prompt
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": user_prompt
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
+        response = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: client.chat.completions.create(
+                    model="qwen/qwen2.5-vl-7b-instruct",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": system_prompt
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": user_prompt
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}"
+                                    }
                                 }
-                            }
-                        ]
-                    }
-                ],
-                temperature=0.7,
-                max_tokens=1000
-            )
+                            ]
+                        }
+                    ],
+                    temperature=0.7,
+                    max_tokens=1000
+                )
+            ),
+            timeout=20
         )
         return response.choices[0].message.content
     except Exception as e:

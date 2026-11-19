@@ -2,16 +2,24 @@ import os
 import tempfile
 import base64
 import docx
+from datetime import datetime, timedelta
 from config import bot, client, MODES, user_histories, user_modes, ADMIN_IDS
 from ai_service import ask_ai, ask_ai_with_vision
 from utils import get_keyboard, send_long_message, send_smart_reply, make_py_file
-from dental_data import CLINIC_INFO, SERVICES_TEXT, DOCTORS
+from dental_data import CLINIC_INFO, SERVICES_TEXT
 from database import add_booking, remove_booking_by_id, is_slot_booked, get_all_bookings, get_user_bookings
-from crm_service import fetch_available_slots_from_crm, sync_create_booking_in_crm, sync_cancel_booking_in_crm
+from crm_service import (
+    fetch_doctors_from_crm,
+    fetch_available_slots_from_crm,
+    sync_create_booking_in_crm,
+    sync_cancel_booking_in_crm,
+)
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 # Временное хранилище шагов выбора врача/времени в памяти
 appointments_storage = {}
+
+DOCTORS_PER_PAGE = 6
 
 MENU_BUTTONS = {
     "👩‍⚕️ Администратор",
@@ -51,6 +59,53 @@ async def check_mode_selected(message):
         )
         return False
     return True
+
+
+async def build_doctors_keyboard(chat_id: int, page: int = 1, limit: int = DOCTORS_PER_PAGE):
+    """
+    Запрашивает страницу врачей из 1С и собирает клавиатуру с пагинацией.
+    Возвращает (text, markup), где markup=None при недоступности 1С.
+    """
+    data = await fetch_doctors_from_crm(page=max(1, page), limit=limit)
+    doctors = data.get("doctors", [])
+    total = data.get("total", 0)
+    current_page = data.get("page", page)
+
+    if not doctors and total == 0:
+        return (
+            "⚠️ Не удалось получить список врачей из 1С. Проверьте, запущен ли симулятор 1С (`mock_1c_server.py`).",
+            None,
+        )
+
+    total_pages = max(1, (total + limit - 1) // limit)
+    current_page = min(max(1, current_page), total_pages)
+
+    if chat_id not in appointments_storage:
+        appointments_storage[chat_id] = {}
+    appointments_storage[chat_id]["page"] = current_page
+    appointments_storage[chat_id]["docs_on_page"] = {
+        str(idx): doc for idx, doc in enumerate(doctors)
+    }
+
+    markup = InlineKeyboardMarkup(row_width=1)
+    for idx, doc in enumerate(doctors):
+        btn_text = f"{doc['name']} ({doc['spec']})"
+        markup.add(InlineKeyboardButton(btn_text, callback_data=f"doc_{current_page}_{idx}"))
+
+    nav_buttons = []
+    if current_page > 1:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"docs_page_{current_page - 1}"))
+    if current_page < total_pages:
+        nav_buttons.append(InlineKeyboardButton("Вперёд ➡️", callback_data=f"docs_page_{current_page + 1}"))
+    if nav_buttons:
+        markup.row(*nav_buttons)
+
+    text = (
+        "🗓 <b>Онлайн-запись в клинику (г. Алматы)</b>\n"
+        f"Страница <b>{current_page}</b> из <b>{total_pages}</b> (всего врачей: {total})\n\n"
+        "Выберите врача, к которому хотите записаться:"
+    )
+    return text, markup
 
 
 @bot.message_handler(commands=["start"])
@@ -160,8 +215,9 @@ async def handle_my_appointments(message):
         return
 
     text = "📋 <b>Ваши активные записи в клинику:</b>\n\n"
-    for idx, (booking_id, doctor, time_slot, phone) in enumerate(user_bookings, 1):
-        text += f"{idx}. 👨‍⚕️ Врач: <b>{doctor}</b>\n    🕒 Время: <b>{time_slot}</b>\n    📱 Телефон: <b>{phone}</b>\n\n"
+    for idx, (booking_id, doctor, time_slot, appointment_dt, phone) in enumerate(user_bookings, 1):
+        time_display = appointment_dt or time_slot
+        text += f"{idx}. 👨‍⚕️ Врач: <b>{doctor}</b>\n    🕒 Время: <b>{time_display}</b>\n    📱 Телефон: <b>{phone}</b>\n\n"
 
     text += "📍 Адрес: г. Алматы, ул. Абая 150 (угол ул. Сатпаева)\nЖдем вас!"
 
@@ -219,46 +275,79 @@ async def handle_services(message):
     await send_long_message(message, SERVICES_TEXT)
 
 
-# Обработка кнопки «📅 Записаться»
+# Обработка кнопки «📅 Записаться» (с пагинацией из 1С)
 @bot.message_handler(func=lambda msg: msg.text == "📅 Записаться")
 async def handle_book_start(message):
     if not await check_mode_selected(message):
         return
 
     chat_id = message.chat.id
-
-    markup = InlineKeyboardMarkup(row_width=1)
-    for doc_id, doc_info in DOCTORS.items():
-        btn_text = f"{doc_info['name']} ({doc_info['spec']})"
-        markup.add(InlineKeyboardButton(btn_text, callback_data=f"doc_{doc_id}"))
+    text, markup = await build_doctors_keyboard(chat_id=chat_id, page=1, limit=DOCTORS_PER_PAGE)
 
     await bot.send_message(
         chat_id,
-        "🗓 <b>Онлайн-запись в клинику (г. Алматы)</b>\n\nВыберите врача, к которому хотите записаться:",
+        text,
         parse_mode="HTML",
         reply_markup=markup
     )
 
 
+@bot.callback_query_handler(func=lambda call: call.data.startswith("docs_page_"))
+async def callback_docs_page(call):
+    chat_id = call.message.chat.id
+    try:
+        page = int(call.data.replace("docs_page_", ""))
+    except ValueError:
+        page = 1
+
+    text, markup = await build_doctors_keyboard(chat_id=chat_id, page=page, limit=DOCTORS_PER_PAGE)
+    if not markup:
+        await bot.answer_callback_query(call.id, "⚠️ 1С недоступна", show_alert=True)
+        return
+
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=call.message.message_id,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=markup
+        )
+    except Exception:
+        pass
+    await bot.answer_callback_query(call.id)
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("doc_"))
 async def callback_choose_doctor(call):
     chat_id = call.message.chat.id
-    doc_id = call.data.replace("doc_", "")
+    parts = call.data.split("_")
+    page = int(parts[1]) if len(parts) >= 3 else 1
+    doc_idx = parts[2] if len(parts) >= 3 else "0"
 
-    if doc_id not in DOCTORS:
-        await bot.answer_callback_query(call.id, "❌ Врач не найден.")
+    user_state = appointments_storage.get(chat_id, {})
+    docs_on_page = user_state.get("docs_on_page")
+
+    if not docs_on_page:
+        data = await fetch_doctors_from_crm(page=page, limit=DOCTORS_PER_PAGE)
+        docs_list = data.get("doctors", [])
+        docs_on_page = {str(i): d for i, d in enumerate(docs_list)}
+
+    doc = docs_on_page.get(str(doc_idx))
+    if not doc:
+        await bot.answer_callback_query(call.id, "❌ Врач не найден. Обновите список.", show_alert=True)
         return
 
-    doc = DOCTORS[doc_id]
-
-    if chat_id not in appointments_storage:
-        appointments_storage[chat_id] = {}
-    appointments_storage[chat_id]["doc_id"] = doc_id
-    appointments_storage[chat_id]["doctor"] = doc["name"]
+    appointments_storage[chat_id] = {
+        **user_state,
+        "page": page,
+        "doctor": doc["name"],
+        "spec": doc["spec"],
+    }
 
     markup = InlineKeyboardMarkup(row_width=2)
 
-    # 🔄 СЛОТЫ ЗАПРАШИВАЕМ ЧЕРЕЗ CRM-СЕРВИС
+    # 🔄 СЛОТЫ ЗАПРАШИВАЕМ ЧЕРЕЗ CRM-СЕРВИС (1С)
     live_slots = await fetch_available_slots_from_crm(doc["name"])
 
     available_slots_found = False
@@ -267,7 +356,7 @@ async def callback_choose_doctor(call):
             continue
 
         available_slots_found = True
-        markup.add(InlineKeyboardButton(f"🕒 {time_slot}", callback_data=f"time_{doc_id}_{time_slot}"))
+        markup.add(InlineKeyboardButton(f"🕒 {time_slot}", callback_data=f"time_{time_slot}"))
 
     markup.add(InlineKeyboardButton("⬅️ Назад к списку врачей", callback_data="back_to_docs"))
 
@@ -284,22 +373,38 @@ async def callback_choose_doctor(call):
         parse_mode="HTML",
         reply_markup=markup
     )
+    await bot.answer_callback_query(call.id)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("time_"))
 async def callback_choose_time(call):
     chat_id = call.message.chat.id
-    parts = call.data.split("_")
-    time_slot = parts[-1]
+    time_slot = call.data.replace("time_", "", 1)
 
-    doc_name = appointments_storage.get(chat_id, {}).get("doctor", "Врач")
+    user_state = appointments_storage.get(chat_id, {})
+    doc_name = user_state.get("doctor")
+    if not doc_name:
+        await bot.answer_callback_query(call.id, "⚠️ Выберите врача заново.", show_alert=True)
+        return
 
     if await is_slot_booked(doc_name, time_slot):
         await bot.answer_callback_query(call.id, "⚠️ Упс! Это время только что заняли. Выберите другое.",
                                         show_alert=True)
         return
 
+    appointment_dt = None
+    try:
+        hour, minute = map(int, time_slot.split(":"))
+        now = datetime.now()
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        appointment_dt = target.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        appointment_dt = None
+
     appointments_storage[chat_id]["time"] = time_slot
+    appointments_storage[chat_id]["appointment_dt"] = appointment_dt
 
     contact_markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     contact_btn = KeyboardButton("📱 Поделиться номером телефона", request_contact=True)
@@ -335,6 +440,7 @@ async def handle_phone_number(message):
 
     doc_name = appointments_storage[chat_id]["doctor"]
     time_slot = appointments_storage[chat_id]["time"]
+    appointment_dt = appointments_storage[chat_id].get("appointment_dt")
 
     if message.contact:
         phone = message.contact.phone_number
@@ -356,16 +462,18 @@ async def handle_phone_number(message):
             del appointments_storage[chat_id]
         return
 
-    await add_booking(chat_id, doc_name, time_slot, user_display, phone)
+    await add_booking(chat_id, doc_name, time_slot, user_display, phone, appointment_dt=appointment_dt)
 
-    # 🔄 СИНХРОНИЗИРУЕМ НОВУЮ БРОНЬ С CRM-СИСТЕМОЙ
-    await sync_create_booking_in_crm({
+    # 🔄 СИНХРОНИЗИРУЕМ НОВУЮ БРОНЬ С CRM-СИСТЕМОЙ (1С)
+    crm_ok = await sync_create_booking_in_crm({
         "user_id": chat_id,
         "patient": user_display,
         "phone": phone,
         "doctor": doc_name,
         "time": time_slot
     })
+    if not crm_ok:
+        print(f"⚠️ Внимание: запись {doc_name} ({time_slot}) сохранена в локальной БД, но 1С не подтвердила синхронизацию.")
 
     del appointments_storage[chat_id]
 
@@ -404,18 +512,24 @@ async def handle_phone_number(message):
 @bot.callback_query_handler(func=lambda call: call.data == "back_to_docs")
 async def callback_back_to_docs(call):
     chat_id = call.message.chat.id
-    markup = InlineKeyboardMarkup(row_width=1)
-    for doc_id, doc_info in DOCTORS.items():
-        btn_text = f"{doc_info['name']} ({doc_info['spec']})"
-        markup.add(InlineKeyboardButton(btn_text, callback_data=f"doc_{doc_id}"))
+    saved_page = appointments_storage.get(chat_id, {}).get("page", 1)
+    text, markup = await build_doctors_keyboard(chat_id=chat_id, page=saved_page, limit=DOCTORS_PER_PAGE)
 
-    await bot.edit_message_text(
-        chat_id=chat_id,
-        message_id=call.message.message_id,
-        text="🗓 Выберите врача, к которому хотите записаться:",
-        parse_mode="HTML",
-        reply_markup=markup
-    )
+    if not markup:
+        await bot.answer_callback_query(call.id, "⚠️ 1С недоступна", show_alert=True)
+        return
+
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=call.message.message_id,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=markup
+        )
+    except Exception:
+        pass
+    await bot.answer_callback_query(call.id)
 
 
 # Обработка отмены записи со стороны администратора
@@ -442,7 +556,7 @@ async def callback_admin_cancel(call):
     time_slot = removed_data["time"]
     patient_chat_id = booking_info["user_id"]
 
-    # 🔄 УВЕДОМЛЯЕМ CRM ОБ ОТМЕНЕ ВИЗИТА
+    # 🔄 УВЕДОМЛЯЕМ CRM (1С) ОБ ОТМЕНЕ ВИЗИТА
     await sync_cancel_booking_in_crm(doctor, time_slot)
 
     await bot.answer_callback_query(call.id, "✅ Запись отменена, слот снова свободен!")
