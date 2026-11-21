@@ -4,6 +4,7 @@ from rag_service import init_vector_db, search_knowledge
 
 _vector_db_initialized = False
 _warmup_done = False
+_warmup_lock = asyncio.Lock()
 
 
 def ensure_vector_db():
@@ -15,7 +16,7 @@ def ensure_vector_db():
 
 
 def get_working_models():
-    """Синхронно и надежно собирает актуальные модели Groq при старте."""
+    """Синхронно и надежно собирает актуальные модели Groq при старте с приоритетом быстрых моделей."""
     excluded = [
         "whisper", "guard", "tts", "audio", "vision",
         "embed", "rerank", "allam", "playai", "orpheus"
@@ -29,15 +30,25 @@ def get_working_models():
 
         def priority(name):
             low = name.lower()
-            if "llama" in low and any(tag in low for tag in ["70b", "90b", "405b", "maverick", "scout"]):
+            if "llama-3.3-70b" in low:
                 return 0
-            if "qwen" in low or "deepseek" in low:
+            if "llama-3.1-8b" in low or "instant" in low:
                 return 1
-            if "llama" in low:
+            if "llama" in low and any(tag in low for tag in ["70b", "90b", "405b", "maverick", "scout"]):
                 return 2
-            return 3
+            if "llama" in low:
+                return 3
+            if "gpt-oss-20b" in low:
+                return 4
+            if "gpt-oss" in low:
+                return 5
+            if "qwen" in low or "deepseek" in low:
+                return 6
+            return 7
 
         valid.sort(key=priority)
+        if valid:
+            print(f"📋 Порядок моделей Groq: {valid[:5]}")
         return valid
     except Exception as e:
         print(f"⚠️ Не удалось получить список моделей: {e}")
@@ -60,25 +71,26 @@ async def warmup_ai_services():
     пользователя не ждал холодной инициализации моделей и векторного индекса.
     """
     global _warmup_done
-    if _warmup_done:
-        return
+    async with _warmup_lock:
+        if _warmup_done:
+            return
 
-    loop = asyncio.get_running_loop()
-    try:
-        print("🔥 Прогреваем векторную базу и поисковый индекс...")
-        await asyncio.wait_for(loop.run_in_executor(None, ensure_vector_db), timeout=30)
-        await asyncio.wait_for(
-            loop.run_in_executor(None, lambda: search_knowledge("стоматология прайс запись", n_results=1)),
-            timeout=10
-        )
-        _warmup_done = True
-        print("✅ Прогрев сервисов ИИ завершён — бот готов к быстрым ответам!")
-    except Exception as e:
-        print(f"⚠️ Прогрев прошёл с предупреждением (бот продолжит работу): {e}")
+        loop = asyncio.get_running_loop()
+        try:
+            print("🔥 Прогреваем векторную базу и поисковый индекс...")
+            await asyncio.wait_for(loop.run_in_executor(None, ensure_vector_db), timeout=120)
+            await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: search_knowledge("стоматология прайс запись", n_results=1)),
+                timeout=20
+            )
+            _warmup_done = True
+            print("✅ Прогрев сервисов ИИ завершён — бот готов к быстрым ответам!")
+        except Exception as e:
+            print(f"⚠️ Прогрев прошёл с предупреждением (бот продолжит работу): {e!r}")
 
 
 async def ask_ai(chat_id, user_text):
-    """Асинхронный RAG-запрос в Groq с защитой от долгих зависаний и быстрым переключением моделей."""
+    """Асинхронный RAG-запрос в Groq с быстрым откликом и мгновенным переключением моделей."""
     if not MODELS:
         await initialize_ai_models()
     if not MODELS:
@@ -86,31 +98,29 @@ async def ask_ai(chat_id, user_text):
 
     loop = asyncio.get_running_loop()
 
-    # На случай если warmup ещё не успел завершиться к первому сообщению
-    if not _vector_db_initialized:
-        try:
-            await asyncio.wait_for(loop.run_in_executor(None, ensure_vector_db), timeout=15)
-        except Exception as e:
-            print(f"⚠️ Пропускаем ожидание инициализации векторной базы: {e}")
-
     current_mode = user_modes.get(chat_id, "👩‍⚕️ Администратор")
     system_prompt = MODES.get(current_mode, list(MODES.values())[0])
 
     relevant_context = ""
-    try:
-        relevant_context = await asyncio.wait_for(
-            loop.run_in_executor(None, lambda: search_knowledge(user_text, n_results=2)),
-            timeout=5
-        )
-    except Exception as e:
-        print(f"⚠️ RAG-поиск пропущен/замедлился: {e}")
+    if _vector_db_initialized:
+        try:
+            relevant_context = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda q=user_text: search_knowledge(q, n_results=2)),
+                timeout=2.0
+            )
+        except Exception as e:
+            print(f"⚠️ RAG-поиск пропущен/замедлился: {e}")
+
+    rag_block = (
+        f"\n\n📚 АКТУАЛЬНЫЕ ДАННЫЕ ИЗ БАЗЫ ЗНАНИЙ КЛИНИКИ ПО ЭТОМУ ВОПРОСУ:\n{relevant_context}"
+        if relevant_context else ""
+    )
 
     enhanced_system_prompt = (
-        f"{system_prompt}\n\n"
-        f"📚 АКТУАЛЬНЫЕ ДАННЫЕ ИЗ БАЗЫ ЗНАНИЙ КЛИНИКИ ПО ЭТОМУ ВОПРОСУ:\n"
-        f"{relevant_context}\n\n"
-        "🛑 Напоминание: не записывай через чат (только кнопка «📅 Записаться»), не выводи простыни со списком врачей "
-        "и слотов, не назначай скидки/подарки сам — направляй на ресепшн по номеру +7 (777) 123-45-67."
+        f"{system_prompt}{rag_block}\n\n"
+        "🛑 Напоминание: отвечай тепло, чётко и по делу (без лишней воды). Не записывай через чат "
+        "(только кнопка «📅 Записаться»), не выводи простыни со списком врачей и слотов, не назначай "
+        "скидки/подарки сам — направляй на ресепшн по номеру +7 (777) 123-45-67."
     )
 
     if chat_id not in user_histories:
@@ -119,7 +129,7 @@ async def ask_ai(chat_id, user_text):
         user_histories[chat_id][current_mode] = []
 
     history = user_histories[chat_id][current_mode]
-    recent_history = history[-8:]
+    recent_history = history[-6:]
 
     messages_payload = (
         [{"role": "system", "content": enhanced_system_prompt}]
@@ -129,7 +139,8 @@ async def ask_ai(chat_id, user_text):
 
     last_error = None
 
-    for model_name in MODELS:
+    for idx, model_name in enumerate(MODELS):
+        model_timeout = 6.0 if idx == 0 else 4.5
         try:
             print(f"🚀 Пробуем отправить запрос в модель Groq: {model_name}")
             completion = await asyncio.wait_for(
@@ -138,11 +149,11 @@ async def ask_ai(chat_id, user_text):
                     lambda m=model_name: client.chat.completions.create(
                         model=m,
                         messages=messages_payload,
-                        temperature=0.7,
-                        max_tokens=1000
+                        temperature=0.6,
+                        max_tokens=650
                     )
                 ),
-                timeout=12
+                timeout=model_timeout
             )
             reply_text = completion.choices[0].message.content
             print(f"✅ Успешный ответ от модели {model_name}")
@@ -151,12 +162,12 @@ async def ask_ai(chat_id, user_text):
                 {"role": "user", "content": user_text},
                 {"role": "assistant", "content": reply_text}
             ]
-            user_histories[chat_id][current_mode] = updated_history[-20:]
+            user_histories[chat_id][current_mode] = updated_history[-16:]
 
             return reply_text
 
         except asyncio.TimeoutError:
-            print(f"⏱️ Модель {model_name} отвечала дольше 12 сек, пробуем следующую...")
+            print(f"⏱️ Модель {model_name} отвечала дольше {model_timeout} сек, пробуем следующую...")
             last_error = TimeoutError(f"Timeout on {model_name}")
             continue
         except Exception as e:
@@ -202,7 +213,7 @@ async def ask_ai_with_vision(chat_id, user_prompt, base64_image):
                         }
                     ],
                     temperature=0.7,
-                    max_tokens=1000
+                    max_tokens=800
                 )
             ),
             timeout=20
