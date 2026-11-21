@@ -2,7 +2,7 @@
 
 A full-featured commercial Telegram bot for a dental clinic in Almaty, powered by Artificial Intelligence (Groq API), vector knowledge base retrieval (RAG via ChromaDB), a 1C/CRM integration layer, end-to-end `async/await` concurrency, automated 24-hour patient appointment reminders, multimodality (text, images, voice messages), a smart pricing calculator in Kazakhstani Tenge (₸), interactive paginated online booking, and a protected reception admin dashboard.
 
-> **Language:** English | [🇷🇺 Русская версия ниже](#-русская-версия)
+> **Language:** English | [🇷🇺 Русская версия ниже](https://github.com/yeatbodddy-png/DentalAIBot/blob/main/README_RU.mdgit status)
 
 ---
 
