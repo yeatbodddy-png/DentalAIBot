@@ -1,79 +1,82 @@
 # 🦷 Dental Clinic AI Assistant Bot (`DentalBot`)
 
-Многофункциональный коммерческий Telegram-бот для стоматологической клиники в г. Алматы с поддержкой искусственного интеллекта (Groq API), векторным поиском по базе знаний (RAG на ChromaDB), интеграционным слоем с 1С/CRM, полной асинхронностью на `async/await`, фоновыми напоминаниями пациентам за 24 часа до визита, мультимодальностью (текст, изображения, голосовые сообщения), умным калькулятором цен в тенге, интерактивной онлайн-записью с пагинацией и защищённой панелью администратора (ресепшена).
+A full-featured commercial Telegram bot for a dental clinic in Almaty, powered by Artificial Intelligence (Groq API), vector knowledge base retrieval (RAG via ChromaDB), a 1C/CRM integration layer, end-to-end `async/await` concurrency, automated 24-hour patient appointment reminders, multimodality (text, images, voice messages), a smart pricing calculator in Kazakhstani Tenge (₸), interactive paginated online booking, and a protected reception admin dashboard.
+
+> **Language:** English | [🇷🇺 Русская версия ниже](#-русская-версия)
 
 ---
 
-## 🚀 Основные возможности
+## 🚀 Key Features
 
-- **⚡ Полная асинхронность (`async/await`) и мгновенный первый отклик:** Обработчики сообщений, работа с базой данных, CRM-синхронизация, фоновый планировщик уведомлений и опрос Telegram построены на корутинах (`asyncio`). Синхронные вызовы к Groq и векторному поиску вынесены в фоновые потоки (`run_in_executor`), а при запуске выполняется прогрев эмбеддингов и индекса (`warmup_ai_services`), поэтому бот отвечает быстро уже на самое первое сообщение пользователя без «холодной» задержки.
-- **🤝 Эмпатичный ИИ уровня живого администратора клиники:** Бот не отвечает шаблонно или поверхностно — он общается тепло, внимательно и по существу, как опытный сотрудник ресепшена и врач-стоматолог этой клиники: разбирается во всех процедурах, понимает тревогу пациентов и точно ориентируется в услугах. При этом соблюдаются строгие бизнес-рамки: запись оформляется только через интерактивную клавиатуру («📅 Записаться»), без «простыней» расписаний в чате, а вопросы по скидкам, акциям и индивидуальным условиям переводятся на ресепшн с указанием телефона клиники.
-- **🧠 Роли с контекстом:** Переключение между ролями **Администратора** (консультации по прайсу, расчёт смет, помощь с записью) и **Врача-консультанта** (экспертные медицинские рекомендации и ориентирование по стоимости лечения).
-- **🔍 Векторный поиск знаний (RAG):** Подтягивание релевантных данных о клинике и услугах из локальной векторной базы **ChromaDB** с прогревом при старте, потокобезопасной инициализацией и защитой от таймаутов.
-- **🧮 Умный расчёт стоимости:** Бот знает точный прайс-лист клиники в **казахстанских тенге (₸)** и автоматически складывает стоимость нескольких услуг при комплексном лечении.
-- **📍 Локализация:** Привязан к реальному адресу клиники в городе **Алматы** (ул. Абая 150, угол ул. Сатпаева).
-- **📋 Интерактивное меню услуг:** Отправка `.webp` изображения прайс-листа с подробным текстовым описанием категорий.
-- **📅 Интерактивная онлайн-запись и интеграция с 1С / CRM:**
-  - Получение списка врачей с постраничной пагинацией (готово к штату 50–100+ специалистов), запрос живых слотов и синхронизация создания/отмены бронирований через адаптер `crm_service.py` с переиспользуемой сессией и повтором при временных ошибках `500`/`503` (в комплекте идёт локальный симулятор `mock_1c_server.py` на FastAPI/Uvicorn).
-  - Выбор врача со специализацией и свободного времени через инлайн-кнопки.
-  - **Сбор контактов:** Быстрый сбор номеров телефонов пациентов в один клик через Telegram-кнопку `request_contact` или вводом цифр.
-  - **Защита от двойного бронирования (Double Booking):** занятые слоты автоматически скрываются из расписания и блокируются атомарной транзакцией с `asyncio.Lock` и `PRAGMA busy_timeout` в локальной SQLite, а также на стороне 1С/CRM (`409 Conflict`).
-- **⏰ Автоматические напоминания за 24 часа до приёма:** Фоновая задача `reminder_24h_worker` проверяет предстоящие визиты в `clinic.db` (с сохранением даты/времени `appointment_dt` и флага защиты от дублей `reminded_24h`) и отправляет пациенту уведомление в Telegram за сутки до записи, сохраняя устойчивость даже после перезапуска бота.
-- **🔒 Панель администратора (Ресепшен):**
-  - Скрытая команда `/admin` доступна только сотрудникам клиники по защищённому списку `ADMIN_IDS`.
-  - Просмотр активных записей с отображением реальных имён, `@username` и контактных телефонов пациентов.
-  - Отмена записи в один клик с **мгновенным освобождением слота** в общем расписании, синхронизацией с 1С/CRM (`DELETE /api/bookings`) и **автоматической отправкой уведомления пациенту**.
-- **🎤 Голосовые сообщения (Whisper):** Распознавание аудиосообщений с помощью модели `whisper-large-v3-turbo` от Groq.
-- **🧹 Управление памятью:** Сброс контекста диалога в текущей роли командой `/reset`.
-- **🛡️ Устойчивая доставка ответов и отказоустойчивость:** Безопасная отправка длинных ответов с fallback на обычный текст, если Telegram отклоняет Markdown-разметку, таймауты на генерацию и автоматическое переключение между резервными моделями Groq при задержках или ограничениях.
-
----
-
-## 🧪 Надёжность и стресс-хардтест
-
-Проект прошёл комплексный стресс-хардтест на реалистичных бизнес-сценариях для клиники — без критических падений, повреждений базы или потери записей:
-
-- **Гонка за один слот (Race Condition):** при одновременных параллельных попытках забронировать один и тот же слот у врача в базу (`clinic.db`) попадает ровно одна запись, а дубликаты отсекаются атомарной проверкой и статусом `409 Conflict` со стороны 1С без блокировок (`database is locked`).
-- **Задержки и ошибки `500`/`503` со стороны 1С:** при искусственной задержке ответа 1С (6 секунд) и сбоях `500`/`503` бот не зависает, продолжает параллельно консультировать пациентов и выполняет корректный повтор запроса.
-- **Длинные сессии (18+ сообщений):** сохраняется связность диалога, корректно переключаются роли (`👩‍⚕️ Администратор` $\leftrightarrow$ `🦷 Врач-консультант`), точно рассчитываются сметы в тенге (`₸`) и соблюдаются запреты клиники.
-- **Нагрузка 10 параллельных пациентов:** одновременные обращения разных пациентов обрабатываются без падения процесса за счёт переключения между моделями Groq; при пиковых наплывах (20+ одновременных запросов в одну минуту) масштабирование обеспечивается переходом на платный тариф Groq (`Developer tier`) с повышенными лимитами TPM/RPM без изменения кода.
+- **⚡ Full Asynchronous Architecture (`async/await`) & Instant First Response:** Message handlers, database operations, CRM synchronization, the background notification scheduler, and Telegram polling are built entirely on `asyncio` coroutines. Blocking calls to Groq and vector search are offloaded to background threads (`run_in_executor`), while startup warmup (`warmup_ai_services`) preloads embeddings and the search index—ensuring fast responses right from the user's very first message without cold-start delays.
+- **🤝 Empathetic AI Acting Like a Real Clinic Receptionist:** Rather than giving generic or robotic replies, the bot communicates warmly, attentively, and to the point—just like an experienced reception specialist and dental consultant of the clinic. It understands procedures, reassures anxious patients, and strictly follows business guardrails: bookings are only processed via the interactive keyboard ("📅 Записаться"), raw schedule dumps are prevented in chat, and requests for discounts, promotions, or special terms are routed directly to reception with the clinic's phone number.
+- **🧠 Context-Aware Dual Personas:** Seamless switching between **Administrator** (pricing consultations, cost estimates, booking guidance) and **Doctor-Consultant** (expert medical recommendations and treatment cost orientation).
+- **🔍 Retrieval-Augmented Generation (RAG):** Pulls relevant clinic and service details from a local **ChromaDB** vector store with startup warmup, thread-safe initialization, and timeout protection.
+- **🧮 Smart Cost Estimator:** Knows the clinic's exact price list in **Kazakhstani Tenge (₸)** and automatically calculates combined estimates for multi-procedure treatment plans.
+- **📍 Localization:** Tailored to the clinic's physical location in **Almaty** (150 Abay Ave, corner of Satpayev St).
+- **📋 Interactive Service Catalog:** Sends a `.webp` price list graphic paired with a structured breakdown of service categories.
+- **📅 Interactive Online Booking & 1C / CRM Integration:**
+  - Fetches doctors with pagination (scalable to 50–100+ specialists), retrieves live time slots, and synchronizes booking creation/cancellation through `crm_service.py` using a reusable HTTP session and automatic retries on transient `500`/`503` errors (bundled with a local FastAPI/Uvicorn simulator, `mock_1c_server.py`).
+  - Inline selection of doctors by specialty and available appointment slots.
+  - **One-Tap Contact Collection:** Collects patient phone numbers effortlessly via Telegram's `request_contact` button or numeric input.
+  - **Double-Booking Protection:** Booked slots are automatically hidden from the schedule and locked atomically via `asyncio.Lock` and `PRAGMA busy_timeout` in SQLite, as well as on the 1C/CRM side (`409 Conflict`).
+- **⏰ Automated 24-Hour Appointment Reminders:** A background worker (`reminder_24h_worker`) monitors upcoming visits in `clinic.db` (storing `appointment_dt` and a deduplication flag `reminded_24h`) and sends a Telegram reminder 24 hours prior to the visit, remaining resilient across bot restarts.
+- **🔒 Reception Admin Dashboard:**
+  - Hidden `/admin` command restricted to authorized clinic staff via `ADMIN_IDS`.
+  - Lists active bookings with patient names, `@username` handles, and contact phone numbers.
+  - One-click cancellation that **immediately releases the slot** in the schedule, syncs with 1C/CRM (`DELETE /api/bookings`), and **automatically notifies the patient**.
+- **🎤 Voice Message Support (Whisper):** Transcribes audio messages using Groq's `whisper-large-v3-turbo` model for accessibility.
+- **🧹 Memory Management:** Clears conversation context within the current persona via `/reset`.
+- **🛡️ Resilient Delivery & Failover:** Safely delivers long responses with a plain-text fallback if Telegram rejects Markdown formatting, enforces generation timeouts, and automatically fails over across backup Groq models during delays or rate limits.
 
 ---
 
-## 🛠 Технологии и стек
+## 🧪 Reliability & Stress Testing
 
-- **Язык:** Python 3.10+ (`asyncio`, `async/await`)
-- **Базы данных и поиск:**
-  - **SQLite (`aiosqlite`)** (`clinic.db`) — асинхронное хранение записей пациентов, номеров телефонов, даты/времени визита (`appointment_dt`), статуса напоминаний (`reminded_24h`) и занятых слотов с атомарной защитой от двойного бронирования, `PRAGMA busy_timeout`, `WAL` и поддержкой `AUTOINCREMENT`.
-  - **ChromaDB** + `sentence-transformers` (`all-MiniLM-L6-v2`) — локальная векторная база знаний для RAG-поиска по данным клиники с потокобезопасной инициализацией.
-- **Интеграция и API:**
-  - `aiohttp` — асинхронный HTTP-клиент с переиспользуемой сессией и повтором при временных ошибках для двусторонней синхронизации с 1С / CRM.
-  - `FastAPI` + `Uvicorn` (`mock_1c_server.py`) — локальный симулятор 1С для тестирования пагинации врачей, живых слотов и конфликтов бронирования.
-- **Библиотеки:**
-  - `pyTelegramBotAPI` (`AsyncTeleBot`) — асинхронное управление Telegram-ботом, инлайн-интерфейсом и правами доступа.
-  - `aiosqlite` — неблокирующий доступ к СУБД SQLite.
-  - `Groq API` — языковые модели (`openai/gpt-oss-20b`, `openai/gpt-oss-120b`, `qwen/...`, `llama-...` и др.) и модель распознавания речи `whisper-large-v3-turbo`.
-  - `python-dotenv` — безопасное управление переменными окружения.
+The system has been verified under realistic commercial stress scenarios with zero critical crashes, database corruption, or lost appointments:
+
+- **Slot Race Condition Protection:** When multiple users attempt to book the exact same doctor slot simultaneously, only one booking succeeds in `clinic.db` while duplicates are rejected atomically and blocked by `409 Conflict` in 1C—with zero `database is locked` errors.
+- **1C Latency & `500`/`503` Fault Tolerance:** Under simulated 6-second 1C delays and `500`/`503` server errors, the bot remains responsive, continues answering other patients in parallel, and retries transient CRM failures gracefully.
+- **Extended Multi-Turn Sessions (18+ Messages):** Maintains conversational coherence across persona switches (`👩‍⚕️ Administrator` $\leftrightarrow$ `🦷 Doctor-Consultant`), accurately computes multi-item Tenge (₸) estimates, and strictly enforces clinic guardrails.
+- **Concurrent Patient Load (10 Simultaneous Users):** Handles parallel patient inquiries reliably through automatic Groq model failover; for peak commercial traffic (20+ simultaneous requests per minute), capacity scales seamlessly by upgrading to Groq's paid `Developer tier` (higher TPM/RPM limits) with zero code changes required.
 
 ---
 
-## 📂 Структура проекта
+## 🛠 Tech Stack
+
+- **Language:** Python 3.10+ (`asyncio`, `async/await`)
+- **Databases & Vector Search:**
+  - **SQLite (`aiosqlite`)** (`clinic.db`) — non-blocking storage for appointments, phone numbers, visit timestamps (`appointment_dt`), reminder states (`reminded_24h`), and booked slots with atomic double-booking protection, `PRAGMA busy_timeout`, `WAL` mode, and `AUTOINCREMENT`.
+  - **ChromaDB** + `sentence-transformers` (`all-MiniLM-L6-v2`) — local vector knowledge base for RAG retrieval with thread-safe initialization.
+- **Integration & APIs:**
+  - `aiohttp` — asynchronous HTTP client with session pooling and retry logic for two-way 1C/CRM synchronization.
+  - `FastAPI` + `Uvicorn` (`mock_1c_server.py`) — local 1C simulator for testing doctor pagination, live availability slots, and `409` booking conflicts.
+- **Libraries:**
+  - `pyTelegramBotAPI` (`AsyncTeleBot`) — asynchronous Telegram bot framework, inline keyboards, and access control.
+  - `Groq API` — LLMs (`openai/gpt-oss-20b`, `openai/gpt-oss-120b`, `qwen/...`, `llama-...`) and `whisper-large-v3-turbo` for speech-to-text.
+  - `python-dotenv` — secure environment variable management.
+
+---
+
+## 📂 Project Structure
 
 ```text
 DentalBot/
 │
-├── main.py             # Точка входа, прогрев ИИ-сервисов, фоновый воркер напоминаний 24ч и запуск поллинга
-├── handlers.py         # Асинхронные обработчики команд, пагинации врачей, записи, телефона, ГС, текста и админ-панели
-├── ai_service.py       # Интеграция с Groq API, warmup, таймауты/fallback моделей, RAG-контекст и анализ изображений
-├── rag_service.py      # Потокобезопасная инициализация ChromaDB и векторный поиск по базе знаний клиники
-├── crm_service.py      # Сервисный слой интеграции с 1С/CRM (врачи с пагинацией, слоты, ретраи 500/503, бронь/отмена)
-├── mock_1c_server.py   # Локальный симулятор 1С (50 врачей, живые слоты, проверка конфликтов 409)
-├── database.py         # Асинхронное управление SQLite через aiosqlite (записи, даты визитов, напоминания, слоты)
-├── dental_data.py      # База знаний клиники (прайс, расписание, контакты)
-├── utils.py            # Вспомогательные утилиты и асинхронная безопасная отправка сообщений
-├── config.py           # Конфигурация, загрузка ключей, ID администраторов и системные промпты с бизнес-правилами
-├── photos/             # Медиа-файлы (прайс-лист в формате .webp)
-├── chroma_db/          # Локальное хранилище векторной базы ChromaDB (создается автоматически)
-├── clinic.db           # Файл базы данных SQLite (создается автоматически)
-├── .env.example        # Шаблон конфигурационного файла
-└── .gitignore          # Игнорируемые файлы (защита токенов, БД, векторов и кэша)
+├── main.py             # Entry point, AI service warmup, 24h reminder background worker, and polling loop
+├── handlers.py         # Async handlers for commands, doctor pagination, booking, phone input, voice, text, and /admin
+├── ai_service.py       # Groq API integration, warmup, model timeout/failover, RAG context injection, and vision analysis
+├── rag_service.py      # Thread-safe ChromaDB initialization and vector knowledge search
+├── crm_service.py      # 1C/CRM integration layer (paginated doctors, live slots, 500/503 retries, booking/cancellation sync)
+├── mock_1c_server.py   # Local 1C simulator (50 doctors, live slots, 409 conflict validation)
+├── database.py         # Async SQLite manager via aiosqlite (appointments, timestamps, reminder queue, slot locks)
+├── dental_data.py      # Clinic knowledge base (price list, working hours, contact details)
+├── utils.py            # Helper utilities and safe asynchronous message delivery
+├── config.py           # Configuration, API keys, admin IDs, and persona system prompts with business guardrails
+├── photos/             # Media assets (service price list in .webp format)
+├── chroma_db/          # Local ChromaDB vector storage (auto-generated)
+├── clinic.db           # SQLite database file (auto-generated)
+├── .env.example        # Environment variables template
+└── .gitignore          # Ignored files (protects tokens, databases, vector stores, and caches)
+
+
