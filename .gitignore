@@ -7,3 +7,4 @@ chroma_db/
 *.db
 *.sqlite
 *.sqlite3
+clinic.db
