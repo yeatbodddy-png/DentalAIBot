@@ -1,4 +1,5 @@
 import asyncio
+import time
 from config import client, MODES, user_histories, user_modes
 from rag_service import init_vector_db, search_knowledge
 
@@ -8,7 +9,7 @@ _warmup_lock = asyncio.Lock()
 
 
 def ensure_vector_db():
-    """Ленивая инициализация векторной базы без блокировки потока при импорте."""
+    """Ленивая инициализация векторной базы ChromaDB без блокировки потока при импорте."""
     global _vector_db_initialized
     if not _vector_db_initialized:
         init_vector_db()
@@ -67,8 +68,8 @@ async def initialize_ai_models():
 
 async def warmup_ai_services():
     """
-    Прогревает ChromaDB и эмбеддинги при старте бота, чтобы первый вопрос
-    пользователя не ждал холодной инициализации моделей и векторного индекса.
+    Прогревает ChromaDB и эмбеддинги в фоне при старте бота, чтобы векторный поиск
+    был готов к работе без обрыва по раннему таймауту.
     """
     global _warmup_done
     async with _warmup_lock:
@@ -76,21 +77,22 @@ async def warmup_ai_services():
             return
 
         loop = asyncio.get_running_loop()
+        t0 = time.perf_counter()
         try:
-            print("🔥 Прогреваем векторную базу и поисковый индекс...")
-            await asyncio.wait_for(loop.run_in_executor(None, ensure_vector_db), timeout=120)
+            print("🔥 Прогреваем векторную базу ChromaDB и поисковый индекс...")
+            await asyncio.wait_for(loop.run_in_executor(None, ensure_vector_db), timeout=180)
             await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: search_knowledge("стоматология прайс запись", n_results=1)),
-                timeout=20
+                loop.run_in_executor(None, lambda: search_knowledge("стоматология прайс запись", n_results=2)),
+                timeout=60
             )
             _warmup_done = True
-            print("✅ Прогрев сервисов ИИ завершён — бот готов к быстрым ответам!")
+            print(f"✅ Прогрев ChromaDB и ИИ завершён за {time.perf_counter() - t0:.2f}s!")
         except Exception as e:
             print(f"⚠️ Прогрев прошёл с предупреждением (бот продолжит работу): {e!r}")
 
 
 async def ask_ai(chat_id, user_text):
-    """Асинхронный RAG-запрос в Groq с быстрым откликом и мгновенным переключением моделей."""
+    """Асинхронный RAG-запрос в Groq с контекстом ChromaDB и мгновенным переключением моделей."""
     if not MODELS:
         await initialize_ai_models()
     if not MODELS:
@@ -102,14 +104,13 @@ async def ask_ai(chat_id, user_text):
     system_prompt = MODES.get(current_mode, list(MODES.values())[0])
 
     relevant_context = ""
-    if _vector_db_initialized:
-        try:
-            relevant_context = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda q=user_text: search_knowledge(q, n_results=2)),
-                timeout=2.0
-            )
-        except Exception as e:
-            print(f"⚠️ RAG-поиск пропущен/замедлился: {e}")
+    try:
+        relevant_context = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda q=user_text: search_knowledge(q, n_results=2)),
+            timeout=1.5
+        )
+    except Exception as e:
+        print(f"⚠️ Поиск по базе знаний пропущен/замедлился: {e}")
 
     rag_block = (
         f"\n\n📚 АКТУАЛЬНЫЕ ДАННЫЕ ИЗ БАЗЫ ЗНАНИЙ КЛИНИКИ ПО ЭТОМУ ВОПРОСУ:\n{relevant_context}"
@@ -129,7 +130,7 @@ async def ask_ai(chat_id, user_text):
         user_histories[chat_id][current_mode] = []
 
     history = user_histories[chat_id][current_mode]
-    recent_history = history[-6:]
+    recent_history = history[-4:]
 
     messages_payload = (
         [{"role": "system", "content": enhanced_system_prompt}]
@@ -150,7 +151,7 @@ async def ask_ai(chat_id, user_text):
                         model=m,
                         messages=messages_payload,
                         temperature=0.6,
-                        max_tokens=650
+                        max_tokens=450
                     )
                 ),
                 timeout=model_timeout
@@ -162,7 +163,7 @@ async def ask_ai(chat_id, user_text):
                 {"role": "user", "content": user_text},
                 {"role": "assistant", "content": reply_text}
             ]
-            user_histories[chat_id][current_mode] = updated_history[-16:]
+            user_histories[chat_id][current_mode] = updated_history[-12:]
 
             return reply_text
 
