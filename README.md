@@ -1,6 +1,6 @@
 # 🦷 Dental Clinic AI Assistant Bot (`DentalBot`)
 
-A full-featured commercial Telegram bot for a dental clinic in Almaty, powered by Artificial Intelligence (Groq API), vector knowledge base retrieval (RAG via ChromaDB), a 1C/CRM integration layer, end-to-end `async/await` concurrency, automated 24-hour patient appointment reminders, multimodality (text, images, voice messages), a smart pricing calculator in Kazakhstani Tenge (₸), interactive paginated online booking, and a protected reception admin dashboard.
+A full-featured commercial Telegram bot for a dental clinic in Almaty, powered by Artificial Intelligence (Groq API), vector knowledge base retrieval (RAG via ChromaDB), a 1C/CRM integration layer, end-to-end `async/await` concurrency, automated 24-hour patient appointment reminders, multimodality (text, images, voice messages), a smart pricing calculator in Kazakhstani Tenge (₸), interactive paginated online booking, encrypted personal data storage, and a protected reception admin dashboard.
 
 > **Language:** English | [🇷🇺 Русская версия](README_RU.md)
 
@@ -14,6 +14,7 @@ A full-featured commercial Telegram bot for a dental clinic in Almaty, powered b
 - **🔍 Retrieval-Augmented Generation (RAG):** Pulls relevant clinic and service details from a local **ChromaDB** vector store with startup warmup, thread-safe initialization, and timeout protection.
 - **🧮 Smart Cost Estimator:** Knows the clinic's exact price list in **Kazakhstani Tenge (₸)** and automatically calculates combined estimates for multi-procedure treatment plans.
 - **📍 Localization & Almaty Timezone (`GMT+5` / `Asia/Almaty`):** Tailored to the clinic's physical location in **Almaty** (150 Abay Ave, corner of Satpayev St) and anchored to `Asia/Almaty` (`+05:00`) for visit timestamps, 24-hour background reminders, AI time context, and 1C/CRM requests—regardless of the host machine's system timezone.
+- **🔐 Personal Data Encryption:** Sensitive patient fields (`patient_info` and `phone`) in the `appointments` table are encrypted in `clinic.db` using `cryptography.fernet` with `DB_ENCRYPTION_KEY` from `.env` and decrypted on read while preserving backward compatibility with legacy rows.
 - **📋 Interactive Service Catalog:** Sends a `.webp` price list graphic paired with a structured breakdown of service categories.
 - **📅 Interactive Online Booking & 1C / CRM Integration:**
   - Fetches doctors with pagination (scalable to 50–100+ specialists), retrieves live time slots, and synchronizes booking creation/cancellation through `crm_service.py` (passing `Asia/Almaty` / `+05:00` timezone metadata, a reusable HTTP session, and automatic retries on transient `500`/`503` errors; bundled with a local FastAPI/Uvicorn simulator, `mock_1c_server.py`).
@@ -45,8 +46,9 @@ The system has been verified under realistic commercial stress scenarios with ze
 ## 🛠 Tech Stack
 
 - **Language:** Python 3.10+ (`asyncio`, `async/await`, `zoneinfo` with `Asia/Almaty`)
+- **Security & Encryption:** `cryptography` (`Fernet`) — encrypts sensitive fields (`patient_info`, `phone`) before storing in `clinic.db` using `DB_ENCRYPTION_KEY` from `.env`.
 - **Databases & Vector Search:**
-  - **SQLite (`aiosqlite`)** (`clinic.db`) — non-blocking storage for appointments, phone numbers, visit timestamps (`appointment_dt`), reminder states (`reminded_24h`), and booked slots with atomic double-booking protection, `PRAGMA busy_timeout`, `WAL` mode, and `AUTOINCREMENT`.
+  - **SQLite (`aiosqlite`)** (`clinic.db`) — non-blocking storage for appointments, encrypted patient/phone data, visit timestamps (`appointment_dt`), reminder states (`reminded_24h`), and booked slots with atomic double-booking protection, `PRAGMA busy_timeout`, `WAL` mode, and `AUTOINCREMENT`.
   - **ChromaDB** + `sentence-transformers` (`all-MiniLM-L6-v2`) — local vector knowledge base for RAG retrieval with thread-safe initialization.
 - **Integration & APIs:**
   - `aiohttp` — asynchronous HTTP client with session pooling, `Asia/Almaty` (`+05:00`) timezone headers/parameters, and retry logic for two-way 1C/CRM synchronization.
@@ -69,12 +71,12 @@ DentalBot/
 ├── rag_service.py      # Thread-safe ChromaDB initialization and vector knowledge search
 ├── crm_service.py      # 1C/CRM integration layer (paginated doctors, live slots, 500/503 retries, booking sync, GMT+5)
 ├── mock_1c_server.py   # Local 1C simulator (50 doctors, live slots, 409 conflict validation)
-├── database.py         # Async SQLite manager via aiosqlite (appointments, timestamps, reminder queue, slot locks)
+├── database.py         # Async SQLite manager via aiosqlite with Fernet PII encryption, timestamps, and slot locks
 ├── dental_data.py      # Clinic knowledge base (price list, working hours, contact details)
 ├── utils.py            # Almaty timezone helpers (GMT+5), safe async message delivery, and utilities
 ├── config.py           # Configuration, API keys, admin IDs, and persona system prompts with business guardrails
 ├── photos/             # Media assets (service price list in .webp format)
 ├── chroma_db/          # Local ChromaDB vector storage (auto-generated)
-├── clinic.db           # SQLite database file (auto-generated)
+├── clinic.db           # SQLite database file with encrypted PII (auto-generated)
 ├── .env.example        # Environment variables template
 └── .gitignore          # Ignored files (protects tokens, databases, vector stores, and caches)
