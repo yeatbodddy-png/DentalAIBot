@@ -85,4 +85,4 @@ MODES = {
 
 # Память и состояния пользователей
 user_histories = {}
-user_modes = {}
+user_modes = {}git add database.py
