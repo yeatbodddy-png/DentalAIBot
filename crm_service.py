@@ -1,13 +1,25 @@
 import asyncio
 import aiohttp
+from utils import now_almaty
 
 # Адрес нашего локального симулятора 1С (который крутится на порту 8081)
 CRM_BASE_URL = "http://127.0.0.1:8081"
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=8.0, connect=2.0)
 RETRY_STATUSES = {500, 503}
+ALMATY_TZ_NAME = "Asia/Almaty"
+ALMATY_UTC_OFFSET = "+05:00"
 
 _session: aiohttp.ClientSession | None = None
 _session_lock = asyncio.Lock()
+
+
+def _crm_headers() -> dict[str, str]:
+    now = now_almaty()
+    return {
+        "X-Timezone": ALMATY_TZ_NAME,
+        "X-UTC-Offset": ALMATY_UTC_OFFSET,
+        "X-Client-Time-Almaty": now.isoformat(),
+    }
 
 
 async def _get_session() -> aiohttp.ClientSession:
@@ -33,13 +45,13 @@ async def fetch_doctors_from_crm(page: int = 1, limit: int = 6):
     При временных ошибках 500/503 делает короткий повтор.
     """
     url = f"{CRM_BASE_URL}/api/doctors"
-    params = {"page": page, "limit": limit}
+    params = {"page": page, "limit": limit, "timezone": ALMATY_TZ_NAME}
     max_attempts = 2
 
     try:
         session = await _get_session()
         for attempt in range(1, max_attempts + 1):
-            async with session.get(url, params=params) as response:
+            async with session.get(url, params=params, headers=_crm_headers()) as response:
                 if response.status == 200:
                     return await response.json()
                 if response.status in RETRY_STATUSES and attempt < max_attempts:
@@ -55,17 +67,22 @@ async def fetch_doctors_from_crm(page: int = 1, limit: int = 6):
 
 async def fetch_available_slots_from_crm(doctor_name: str):
     """
-    Запрашивает из 1С свободные слоты для конкретного врача через query-параметр.
+    Запрашивает из 1С свободные слоты для конкретного врача по времени Алматы (GMT+5).
     При временных ошибках 500/503 делает короткий повтор.
     """
     url = f"{CRM_BASE_URL}/api/slots"
-    params = {"doctor_name": doctor_name}
+    almaty_date = now_almaty().strftime("%Y-%m-%d")
+    params = {
+        "doctor_name": doctor_name,
+        "date": almaty_date,
+        "timezone": ALMATY_TZ_NAME,
+    }
     max_attempts = 2
 
     try:
         session = await _get_session()
         for attempt in range(1, max_attempts + 1):
-            async with session.get(url, params=params) as response:
+            async with session.get(url, params=params, headers=_crm_headers()) as response:
                 if response.status == 200:
                     data = await response.json()
                     return data.get("available_slots", [])
@@ -82,17 +99,22 @@ async def fetch_available_slots_from_crm(doctor_name: str):
 
 async def sync_create_booking_in_crm(booking_data: dict):
     """
-    Отправляет созданную запись в 1С (переводит слот в статус 'booked',
-    сохраняет имя пациента, телефон и chat_id для связи).
+    Отправляет созданную запись в 1С с указанием часового пояса Алматы (Asia/Almaty, +05:00).
     """
     url = f"{CRM_BASE_URL}/api/bookings"
+    payload = {
+        **booking_data,
+        "timezone": ALMATY_TZ_NAME,
+        "utc_offset": ALMATY_UTC_OFFSET,
+        "created_at_almaty": now_almaty().isoformat(),
+    }
 
     try:
         session = await _get_session()
-        async with session.post(url, json=booking_data) as response:
+        async with session.post(url, json=payload, headers=_crm_headers()) as response:
             if response.status == 200:
                 res_json = await response.json()
-                print(f"✅ Успешно синхронизировано с 1С: {res_json}")
+                print(f"✅ Успешно синхронизировано с 1С (GMT+5): {res_json}")
                 return True
             else:
                 err_text = await response.text()
@@ -108,11 +130,15 @@ async def sync_cancel_booking_in_crm(doctor_name: str, time_slot: str):
     Уведомляет 1С об отмене записи (освобождает слот обратно в 'free').
     """
     url = f"{CRM_BASE_URL}/api/bookings"
-    params = {"doctor": doctor_name, "time": time_slot}
+    params = {
+        "doctor": doctor_name,
+        "time": time_slot,
+        "timezone": ALMATY_TZ_NAME,
+    }
 
     try:
         session = await _get_session()
-        async with session.delete(url, params=params) as response:
+        async with session.delete(url, params=params, headers=_crm_headers()) as response:
             if response.status == 200:
                 print(f"🗑️ 1С подтвердила отмену записи: врач {doctor_name}, слот {time_slot}")
                 return True

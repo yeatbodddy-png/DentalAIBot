@@ -1,11 +1,13 @@
 import os
+import asyncio
+import re
 import tempfile
 import base64
 import docx
 from datetime import datetime, timedelta
 from config import bot, client, MODES, user_histories, user_modes, ADMIN_IDS
 from ai_service import ask_ai, ask_ai_with_vision
-from utils import get_keyboard, send_long_message, send_smart_reply, make_py_file
+from utils import get_keyboard, send_long_message, send_smart_reply, make_py_file, now_almaty_naive
 from dental_data import CLINIC_INFO, SERVICES_TEXT
 from database import add_booking, remove_booking_by_id, is_slot_booked, get_all_bookings, get_user_bookings
 from crm_service import (
@@ -31,6 +33,44 @@ MENU_BUTTONS = {
     "🕒 График работы",
     "🔄 Сменить роль",
 }
+
+_DENTAL_AND_CHAT_ROOTS = (
+    # Русский
+    "здрав", "привет", "салам", "подскаж", "скаж", "скольк", "цена", "стои", "прайс",
+    "зуб", "кариес", "пломб", "канал", "удален", "мудрост", "имплант", "коронк",
+    "винир", "брекет", "чистк", "болит", "боль", "лечен", "врач", "доктор",
+    "запис", "свобод", "время", "адрес", "график", "работа", "скидк", "акци", "телефон",
+    # Казахский
+    "сәлем", "салем", "қайырлы", "сұрақ", "баға", "қанша", "тұрад", "тіс", "емде",
+    "түбір", "арна", "жұл", "алу", "қаптама", "винір", "ауыр", "дәрігер",
+    "жазыл", "бос", "уақыт", "мекенжай", "жұмыс", "жеңілдік", "нөмір", "хабарлас",
+)
+
+_WHISPER_HALLUCINATIONS = (
+    "субтитр", "продолжение следует", "подписывайтесь", "спасибо за просмотр",
+    "dimatorzok", "amara.org", "thanks for watching",
+)
+
+
+def _is_garbled_voice(text: str) -> bool:
+    """Определяет, превратилось ли голосовое сообщение в неразборчивую кашу слов."""
+    low = (text or "").strip().lower()
+    if not low:
+        return True
+
+    if any(bad in low for bad in _WHISPER_HALLUCINATIONS):
+        return True
+
+    words = re.findall(r"[а-яёәіңғүұқөһa-z]+", low)
+    if not words:
+        return True
+
+    # Если слов 3 и больше, но нет ни одного понятного корня по теме клиники/общения —
+    # скорее всего, при смешении языков Whisper распознал речь с искажениями.
+    if len(words) >= 3 and not any(root in low for root in _DENTAL_AND_CHAT_ROOTS):
+        return True
+
+    return False
 
 
 async def notify_all_admins(text, parse_mode="HTML"):
@@ -395,7 +435,7 @@ async def callback_choose_time(call):
     appointment_dt = None
     try:
         hour, minute = map(int, time_slot.split(":"))
-        now = datetime.now()
+        now = now_almaty_naive()
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= now:
             target += timedelta(days=1)
@@ -579,7 +619,6 @@ async def callback_admin_cancel(call):
         parse_mode="HTML"
     )
 
-
 # 🎤 ОБРАБОТКА ГОЛОСОВЫХ СООБЩЕНИЙ
 @bot.message_handler(content_types=["voice"])
 async def handle_voice(message):
@@ -589,6 +628,7 @@ async def handle_voice(message):
     chat_id = message.chat.id
     await bot.send_chat_action(chat_id, "typing")
     temp_path = None
+    loop = asyncio.get_running_loop()
 
     try:
         file_info = await bot.get_file(message.voice.file_id)
@@ -599,30 +639,60 @@ async def handle_voice(message):
             temp_path = temp_audio.name
 
         with open(temp_path, "rb") as audio_file:
-            transcription = client.audio.transcriptions.create(
-                file=(os.path.basename(temp_path), audio_file.read()),
-                model="whisper-large-v3-turbo"
-            )
+            audio_bytes = audio_file.read()
+            audio_filename = os.path.basename(temp_path)
 
-        recognized_text = transcription.text.strip()
-        if not recognized_text:
-            await bot.reply_to(message,
-                               "Не удалось разобрать слова в голосовом сообщении 🤷‍♂️ Попробуйте еще раз или напишите текстом.")
+        transcription = await loop.run_in_executor(
+            None,
+            lambda: client.audio.transcriptions.create(
+                file=(audio_filename, audio_bytes),
+                model="whisper-large-v3-turbo",
+                temperature=0.0,
+                prompt=(
+                    "Стоматологическая клиника в Алматы. Русский и казахский языки: "
+                    "тіс емдеу, кариес, пломба, канал, имплант, қаптама, винир, брекет, "
+                    "бағасы қанша, мекенжай, жазылу."
+                )
+            )
+        )
+
+        recognized_text = (transcription.text or "").strip()
+        print(f"🎙️ Whisper распознал для {chat_id}: {recognized_text!r}")
+
+        if not recognized_text or _is_garbled_voice(recognized_text):
+            await bot.reply_to(
+                message,
+                "🙏 Извините, в голосовом сообщении не всё удалось разобрать чётко (особенно при переходе с русского на казахский).\n"
+                "Напишите, пожалуйста, ваш вопрос текстом — с радостью подскажу!\n\n"
+                "Кешіріңіз, дауыстық хабарлама толық анық естілмеді. Сұрағыңызды мәтінмен жазып жіберіңізші — қуана жауап беремін! 😊"
+            )
             return
 
         await bot.reply_to(message, f"🎤 _Вы сказали:_ «{recognized_text}»", parse_mode="Markdown")
         await bot.send_chat_action(chat_id, "typing")
 
-        reply = await ask_ai(chat_id, recognized_text)
-        await send_smart_reply(message, reply)
+        print(f"🤖 Передаем распознанный голос в ask_ai для чата {chat_id}...")
+        reply = await asyncio.wait_for(ask_ai(chat_id, recognized_text), timeout=18.0)
+        print(f"💬 Ответ по голосовому получен (длина: {len(reply) if reply else 0} симв.). Отправляем...")
 
+        await send_smart_reply(message, reply)
+        print("✅ Ответ на голосовое сообщение доставлен!")
+
+    except asyncio.TimeoutError:
+        print(f"⏱️ Таймаут при обработке ответа ИИ на голосовое для чата {chat_id}")
+        await bot.reply_to(
+            message,
+            "⏳ Извините, ответ формируется дольше обычного. Повторите, пожалуйста, запрос через пару секунд или напишите текстом."
+        )
     except Exception as e:
         print(f"❌ Ошибка обработки голосового: {e}")
         await bot.reply_to(message, "⚠️ Не получилось обработать голосовое сообщение. Попробуйте написать текстом.")
     finally:
         if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
-
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
 
 # 🤖 ОБЫЧНЫЕ ТЕКСТОВЫЕ ВОПРОСЫ К ИИ (ВСЕГДА СТРОГО В САМОМ НИЗУ ФАЙЛА!)
 @bot.message_handler(

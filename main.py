@@ -2,16 +2,18 @@ import asyncio
 from datetime import datetime, timedelta
 from config import bot
 from ai_service import MODELS, initialize_ai_models, warmup_ai_services
+from utils import now_almaty_naive
+from crm_service import close_crm_session
 import handlers  # noqa: F401
 from telebot.types import BotCommand
 from database import init_db, get_pending_24h_bookings, mark_24h_reminded
 
 
 async def reminder_24h_worker():
-    """Фоновая задача: раз в минуту проверяет записи и напоминает клиенту за сутки до приёма"""
+    """Фоновая задача: раз в минуту проверяет записи по времени Алматы (GMT+5) и напоминает за сутки до приёма"""
     while True:
         try:
-            now = datetime.now()
+            now = now_almaty_naive()
             pending = await get_pending_24h_bookings()
 
             for booking_id, user_id, doctor, time_slot, appointment_dt, phone in pending:
@@ -29,7 +31,7 @@ async def reminder_24h_worker():
                         "⏰ <b>Напоминание о записи в клинику!</b>\n\n"
                         "Напоминаем, что у вас запланирован приём в течение ближайших 24 часов:\n"
                         f"👨‍⚕️ Врач: <b>{doctor}</b>\n"
-                        f"📅 Дата и время: <b>{appointment_dt}</b> (слот {time_slot})\n"
+                        f"📅 Дата и время (GMT+5): <b>{appointment_dt}</b> (слот {time_slot})\n"
                         f"📍 Адрес: г. Алматы, ул. Абая 150 (угол ул. Сатпаева)\n\n"
                         "Если планы изменились, пожалуйста, сообщите нам заранее."
                     )
@@ -48,8 +50,9 @@ async def reminder_24h_worker():
 async def main():
     await initialize_ai_models()
     await init_db()
-    await warmup_ai_services()
 
+    # Запускаем прогрев векторной базы в фоне, чтобы не задерживать старт бота
+    asyncio.create_task(warmup_ai_services())
     asyncio.create_task(reminder_24h_worker())
 
     print(f"📦 Модуль хендлеров загружен: {handlers.__name__}")
@@ -64,7 +67,10 @@ async def main():
     print(f"🤖 Найдены актуальные модели: {MODELS}")
     print("✅ Асинхронный DentalBot успешно запущен в PyCharm и ждёт сообщений!")
 
-    await bot.infinity_polling(timeout=20)
+    try:
+        await bot.infinity_polling(timeout=20)
+    finally:
+        await close_crm_session()
 
 
 if __name__ == "__main__":

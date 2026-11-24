@@ -18,16 +18,40 @@ _chroma_lock = threading.RLock()
 
 _FALLBACK_DOCS: list[str] = []
 
+_WORD_RE = re.compile(r"[а-яёәіңғүұқөһa-z0-9]+")
+
+_BILINGUAL_SYNONYMS = {
+    "кариес": ["кариес", "пломба", "пломбу", "лечение", "зуб", "зуба", "зубов", "тіс", "тісті", "емдеу", "пломбалау"],
+    "канал": ["канал", "каналы", "каналов", "пульпит", "нерв", "корневых", "түбір", "арна", "жүйке"],
+    "удаление": ["удаление", "удалить", "вырвать", "мудрости", "восьмерка", "восьмёрка", "алу", "жұлдыру", "ақыл", "тісін"],
+    "имплант": ["имплант", "имплантация", "импланты", "протез", "мост", "импланттау", "протездеу"],
+    "коронка": ["коронка", "коронки", "коронку", "металлокерамика", "цирконий", "циркониевая", "протезирование", "қаптама", "цирконийлі"],
+    "винир": ["винир", "виниры", "виниров", "керамический", "эстетика", "винір", "керамикалық"],
+    "брекеты": ["брекеты", "брекетов", "брекет", "челюсть", "прикус", "ортодонтия", "металлические", "эстетические", "жақ", "тістеу"],
+    "цена": ["цена", "цены", "стоит", "стоимость", "прайс", "сколько", "тенге", "₸", "смета", "баға", "бағасы", "қанша", "тұрады"],
+    "контакты": ["адрес", "где", "находитесь", "алматы", "абая", "сатпаева", "телефон", "позвонить", "ресепшн", "мекенжай", "қайда", "нөмір", "хабарласу"],
+    "график": ["график", "работаете", "часы", "время", "открываетесь", "выходной", "воскресенье", "суббота", "жұмыс", "уақыты", "кестесі", "демалыс"],
+}
+
 
 def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text)
+
+
+def _expand_query(query: str) -> str:
+    words = set(_WORD_RE.findall((query or "").lower()))
+    expanded = set(words)
+    for group in _BILINGUAL_SYNONYMS.values():
+        if words & set(group):
+            expanded.update(group)
+    return " ".join(sorted(expanded)) if expanded else (query or "")
 
 
 def _build_fallback_docs() -> list[str]:
     global _FALLBACK_DOCS
     if not _FALLBACK_DOCS:
         clinic_contacts = _strip_html(
-            f"Название клиники: {CLINIC_INFO['name']}. "
+            f"Название клиники / Клиника атауы: {CLINIC_INFO['name']}. "
             f"{CLINIC_INFO['address']}. "
             f"{CLINIC_INFO['phone']}."
         )
@@ -41,7 +65,7 @@ def _build_fallback_docs() -> list[str]:
 
 def _fallback_search(query: str, n_results: int = 2) -> str:
     docs = _build_fallback_docs()
-    words = set(re.findall(r"[а-яёa-z0-9]+", (query or "").lower()))
+    words = set(_WORD_RE.findall(_expand_query(query).lower()))
     if not words:
         return "\n\n".join(docs[:n_results])
 
@@ -111,16 +135,18 @@ def init_vector_db():
 
 def search_knowledge(query, n_results=2):
     """
-    Ищет релевантные фрагменты в ChromaDB. Если индекс ещё не прогрузился
-    или возникла ошибка, мгновенно возвращает данные из локального справочника клиники.
+    Ищет релевантные фрагменты в ChromaDB с расширением RU/KZ синонимов.
+    Если индекс ещё не прогрузился или возникла ошибка, мгновенно возвращает данные из фолбэка.
     """
+    expanded_query = _expand_query(query)
+
     if _collection is None:
-        return _fallback_search(query, n_results=n_results)
+        return _fallback_search(expanded_query, n_results=n_results)
 
     try:
         with _chroma_lock:
             results = _collection.query(
-                query_texts=[query],
+                query_texts=[expanded_query],
                 n_results=n_results,
             )
         retrieved_docs = results.get("documents", [[]])[0]
@@ -129,4 +155,4 @@ def search_knowledge(query, n_results=2):
     except Exception as e:
         print(f"⚠️ Ошибка при векторном поиске в ChromaDB, используем фолбэк: {e}")
 
-    return _fallback_search(query, n_results=n_results)
+    return _fallback_search(expanded_query, n_results=n_results)

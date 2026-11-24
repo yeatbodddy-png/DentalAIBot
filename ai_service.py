@@ -2,6 +2,7 @@ import asyncio
 import time
 from config import client, MODES, user_histories, user_modes
 from rag_service import init_vector_db, search_knowledge
+from utils import now_almaty
 
 _vector_db_initialized = False
 _warmup_done = False
@@ -102,6 +103,7 @@ async def ask_ai(chat_id, user_text):
 
     current_mode = user_modes.get(chat_id, "👩‍⚕️ Администратор")
     system_prompt = MODES.get(current_mode, list(MODES.values())[0])
+    almaty_now_str = now_almaty().strftime("%Y-%m-%d %H:%M")
 
     relevant_context = ""
     try:
@@ -119,9 +121,12 @@ async def ask_ai(chat_id, user_text):
 
     enhanced_system_prompt = (
         f"{system_prompt}{rag_block}\n\n"
-        "🛑 Напоминание: отвечай тепло, чётко и по делу (без лишней воды). Не записывай через чат "
-        "(только кнопка «📅 Записаться»), не выводи простыни со списком врачей и слотов, не назначай "
-        "скидки/подарки сам — направляй на ресепшн по номеру +7 (777) 123-45-67."
+        f"🕒 ТЕКУЩЕЕ ВРЕМЯ В АЛМАТЫ (GMT+5 / Asia/Almaty): {almaty_now_str}. "
+        "Если пациент спрашивает о текущем времени или дате, опирайся строго на это время по Алматы.\n"
+        "🛑 Напоминание: отвечай тепло, чётко и по делу (без лишней воды), всегда дописывай мысль до конца "
+        "и не обрывай слова/фразы. Понимай русский, казахский и смешанную речь, отвечая на языке основного "
+        "обращения пациента. Не записывай через чат (только кнопка «📅 Записаться»), не выводи простыни "
+        "со списком врачей и слотов, не назначай скидки/подарки сам — направляй на ресепшн по номеру +7 (777) 123-45-67."
     )
 
     if chat_id not in user_histories:
@@ -141,7 +146,7 @@ async def ask_ai(chat_id, user_text):
     last_error = None
 
     for idx, model_name in enumerate(MODELS):
-        model_timeout = 6.0 if idx == 0 else 4.5
+        model_timeout = 8.0 if idx == 0 else 6.0
         try:
             print(f"🚀 Пробуем отправить запрос в модель Groq: {model_name}")
             completion = await asyncio.wait_for(
@@ -151,7 +156,7 @@ async def ask_ai(chat_id, user_text):
                         model=m,
                         messages=messages_payload,
                         temperature=0.6,
-                        max_tokens=450
+                        max_tokens=900
                     )
                 ),
                 timeout=model_timeout
