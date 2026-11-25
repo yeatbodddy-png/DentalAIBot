@@ -2,14 +2,22 @@ import os
 import asyncio
 import re
 import tempfile
-import base64
-import docx
-from datetime import datetime, timedelta
-from config import bot, client, MODES, user_histories, user_modes, ADMIN_IDS
-from ai_service import ask_ai, ask_ai_with_vision
-from utils import get_keyboard, send_long_message, send_smart_reply, make_py_file, now_almaty_naive
+from datetime import timedelta
+from config import (
+    bot,
+    client,
+    MODES,
+    user_histories,
+    user_modes,
+    ADMIN_IDS,
+    CLINIC_NAME,
+    CLINIC_CITY,
+    CLINIC_ADDRESS,
+)
+from ai_service import ask_ai
+from utils import get_keyboard, send_long_message, send_smart_reply, now_almaty_naive
 from dental_data import CLINIC_INFO, SERVICES_TEXT
-from database import add_booking, remove_booking_by_id, is_slot_booked, get_all_bookings, get_user_bookings
+from database import add_booking, remove_booking_by_id, is_slot_booked, get_all_bookings, get_user_bookings, mask_phone
 from crm_service import (
     fetch_doctors_from_crm,
     fetch_available_slots_from_crm,
@@ -18,7 +26,6 @@ from crm_service import (
 )
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
-# Временное хранилище шагов выбора врача/времени в памяти
 appointments_storage = {}
 
 DOCTORS_PER_PAGE = 6
@@ -35,12 +42,10 @@ MENU_BUTTONS = {
 }
 
 _DENTAL_AND_CHAT_ROOTS = (
-    # Русский
     "здрав", "привет", "салам", "подскаж", "скаж", "скольк", "цена", "стои", "прайс",
     "зуб", "кариес", "пломб", "канал", "удален", "мудрост", "имплант", "коронк",
     "винир", "брекет", "чистк", "болит", "боль", "лечен", "врач", "доктор",
     "запис", "свобод", "время", "адрес", "график", "работа", "скидк", "акци", "телефон",
-    # Казахский
     "сәлем", "салем", "қайырлы", "сұрақ", "баға", "қанша", "тұрад", "тіс", "емде",
     "түбір", "арна", "жұл", "алу", "қаптама", "винір", "ауыр", "дәрігер",
     "жазыл", "бос", "уақыт", "мекенжай", "жұмыс", "жеңілдік", "нөмір", "хабарлас",
@@ -53,7 +58,6 @@ _WHISPER_HALLUCINATIONS = (
 
 
 def _is_garbled_voice(text: str) -> bool:
-    """Определяет, превратилось ли голосовое сообщение в неразборчивую кашу слов."""
     low = (text or "").strip().lower()
     if not low:
         return True
@@ -65,8 +69,6 @@ def _is_garbled_voice(text: str) -> bool:
     if not words:
         return True
 
-    # Если слов 3 и больше, но нет ни одного понятного корня по теме клиники/общения —
-    # скорее всего, при смешении языков Whisper распознал речь с искажениями.
     if len(words) >= 3 and not any(root in low for root in _DENTAL_AND_CHAT_ROOTS):
         return True
 
@@ -74,9 +76,6 @@ def _is_garbled_voice(text: str) -> bool:
 
 
 async def notify_all_admins(text, parse_mode="HTML"):
-    """
-    Надежная асинхронная рассылка уведомлений всем администраторам из ADMIN_IDS с try-except.
-    """
     if not ADMIN_IDS:
         print("⚠️ Предупреждение: список ADMIN_IDS пуст, некому отправлять уведомления!")
         return
@@ -89,7 +88,6 @@ async def notify_all_admins(text, parse_mode="HTML"):
 
 
 async def check_mode_selected(message):
-    """Проверяет, выбрал ли пользователь режим. Если нет — просит выбрать."""
     chat_id = message.chat.id
     if chat_id not in user_modes or user_modes[chat_id] is None:
         await bot.reply_to(
@@ -102,10 +100,6 @@ async def check_mode_selected(message):
 
 
 async def build_doctors_keyboard(chat_id: int, page: int = 1, limit: int = DOCTORS_PER_PAGE):
-    """
-    Запрашивает страницу врачей из 1С и собирает клавиатуру с пагинацией.
-    Возвращает (text, markup), где markup=None при недоступности 1С.
-    """
     data = await fetch_doctors_from_crm(page=max(1, page), limit=limit)
     doctors = data.get("doctors", [])
     total = data.get("total", 0)
@@ -141,7 +135,7 @@ async def build_doctors_keyboard(chat_id: int, page: int = 1, limit: int = DOCTO
         markup.row(*nav_buttons)
 
     text = (
-        "🗓 <b>Онлайн-запись в клинику (г. Алматы)</b>\n"
+        f"🗓 <b>Онлайн-запись в клинику ({CLINIC_CITY})</b>\n"
         f"Страница <b>{current_page}</b> из <b>{total_pages}</b> (всего врачей: {total})\n\n"
         "Выберите врача, к которому хотите записаться:"
     )
@@ -151,12 +145,12 @@ async def build_doctors_keyboard(chat_id: int, page: int = 1, limit: int = DOCTO
 @bot.message_handler(commands=["start"])
 async def handle_start(message):
     chat_id = message.chat.id
-    user_modes[chat_id] = None  # Сбрасываем при старте
+    user_modes[chat_id] = None
 
     await bot.send_chat_action(chat_id, "typing")
 
     welcome_text = (
-        "👋 Здравствуйте! Добро пожаловать в нашу стоматологическую клинику в г. Алматы.\n\n"
+        f"👋 Здравствуйте! Добро пожаловать в клинику <b>«{CLINIC_NAME}»</b> ({CLINIC_CITY}).\n\n"
         "Я ваш цифровой помощник. Сначала выберите, с кем вы хотите пообщаться:\n"
         "• <b>👩‍⚕️ Администратор</b> — ответит на вопросы по ценам, расчетам услуг и записи.\n"
         "• <b>🦷 Врач-консультант</b> — проконсультирует по медицинским вопросам и стоимости лечения.\n\n"
@@ -180,7 +174,6 @@ async def handle_reset(message):
     )
 
 
-# 👑 КОМАНДА АДМИНИСТРАТОРА (Асинхронная)
 @bot.message_handler(commands=["admin"])
 async def handle_admin_panel(message):
     chat_id = message.chat.id
@@ -192,8 +185,11 @@ async def handle_admin_panel(message):
     active_bookings = await get_all_bookings()
 
     if not active_bookings:
-        await bot.reply_to(message, "📋 <b>Панель управления ресепшена:</b>\n\nВ данный момент активных записей нет.",
-                           parse_mode="HTML")
+        await bot.reply_to(
+            message,
+            "📋 <b>Панель управления ресепшена:</b>\n\nВ данный момент активных записей нет.",
+            parse_mode="HTML"
+        )
         return
 
     markup = InlineKeyboardMarkup(row_width=1)
@@ -213,7 +209,6 @@ async def handle_admin_panel(message):
     await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
 
 
-# Обработка переключения режимов и кликов по главным кнопкам меню
 @bot.message_handler(func=lambda msg: msg.text in ["👩‍⚕️ Администратор", "🦷 Врач-консультант"])
 async def handle_mode_switch(message):
     chat_id = message.chat.id
@@ -237,7 +232,6 @@ async def handle_mode_switch(message):
     )
 
 
-# Обработка кнопки «📋 Мои записи»
 @bot.message_handler(func=lambda msg: msg.text == "📋 Мои записи")
 async def handle_my_appointments(message):
     if not await check_mode_selected(message):
@@ -259,7 +253,7 @@ async def handle_my_appointments(message):
         time_display = appointment_dt or time_slot
         text += f"{idx}. 👨‍⚕️ Врач: <b>{doctor}</b>\n    🕒 Время: <b>{time_display}</b>\n    📱 Телефон: <b>{phone}</b>\n\n"
 
-    text += "📍 Адрес: г. Алматы, ул. Абая 150 (угол ул. Сатпаева)\nЖдем вас!"
+    text += f"📍 Адрес: {CLINIC_CITY}, {CLINIC_ADDRESS}\nЖдем вас!"
 
     await bot.reply_to(message, text, parse_mode="HTML")
 
@@ -275,7 +269,6 @@ async def handle_change_role(message):
     )
 
 
-# 📍 ОБРАБОТКА КНОПКИ «Адрес»
 @bot.message_handler(func=lambda msg: msg.text == "📍 Адрес")
 async def handle_address(message):
     if not await check_mode_selected(message):
@@ -283,7 +276,6 @@ async def handle_address(message):
     await bot.reply_to(message, f"{CLINIC_INFO['name']}\n\n{CLINIC_INFO['address']}\n{CLINIC_INFO['phone']}")
 
 
-# 🕒 ОБРАБОТКА КНОПКИ «График работы»
 @bot.message_handler(func=lambda msg: msg.text == "🕒 График работы")
 async def handle_work_hours(message):
     if not await check_mode_selected(message):
@@ -291,7 +283,6 @@ async def handle_work_hours(message):
     await bot.reply_to(message, CLINIC_INFO['work_hours'])
 
 
-# Обработка кнопки «Услуги»
 @bot.message_handler(func=lambda msg: msg.text == "🩺 Услуги")
 async def handle_services(message):
     if not await check_mode_selected(message):
@@ -315,7 +306,6 @@ async def handle_services(message):
     await send_long_message(message, SERVICES_TEXT)
 
 
-# Обработка кнопки «📅 Записаться» (с пагинацией из 1С)
 @bot.message_handler(func=lambda msg: msg.text == "📅 Записаться")
 async def handle_book_start(message):
     if not await check_mode_selected(message):
@@ -386,8 +376,6 @@ async def callback_choose_doctor(call):
     }
 
     markup = InlineKeyboardMarkup(row_width=2)
-
-    # 🔄 СЛОТЫ ЗАПРАШИВАЕМ ЧЕРЕЗ CRM-СЕРВИС (1С)
     live_slots = await fetch_available_slots_from_crm(doc["name"])
 
     available_slots_found = False
@@ -453,7 +441,8 @@ async def callback_choose_time(call):
     await bot.send_message(
         chat_id,
         f"✅ Вы выбрали: <b>{doc_name}</b> на время <b>{time_slot}</b>.\n\n"
-        "Последний шаг! Пожалуйста, поделитесь вашим номером телефона с помощью кнопки ниже, чтобы администратор клиники мог связаться с вами:",
+        "Последний шаг! Пожалуйста, поделитесь вашим номером телефона с помощью кнопки ниже, чтобы администратор клиники мог связаться с вами:\n"
+        "<i>Отправляя номер, вы соглашаетесь на его обработку для записи на приём.</i>",
         parse_mode="HTML",
         reply_markup=contact_markup
     )
@@ -504,7 +493,6 @@ async def handle_phone_number(message):
 
     await add_booking(chat_id, doc_name, time_slot, user_display, phone, appointment_dt=appointment_dt)
 
-    # 🔄 СИНХРОНИЗИРУЕМ НОВУЮ БРОНЬ С CRM-СИСТЕМОЙ (1С)
     crm_ok = await sync_create_booking_in_crm({
         "user_id": chat_id,
         "patient": user_display,
@@ -513,7 +501,7 @@ async def handle_phone_number(message):
         "time": time_slot
     })
     if not crm_ok:
-        print(f"⚠️ Внимание: запись {doc_name} ({time_slot}) сохранена в локальной БД, но 1С не подтвердила синхронизацию.")
+        print(f"⚠️ Внимание: запись {doc_name} ({time_slot}, тел. {mask_phone(phone)}) сохранена в локальной БД, но 1С не подтвердила синхронизацию.")
 
     del appointments_storage[chat_id]
 
@@ -539,7 +527,7 @@ async def handle_phone_number(message):
     await bot.send_message(
         chat_id,
         "✅ <b>Запись успешно оформлена! Ждем вас в клинике.</b>\n\n"
-        f"📍 Адрес: г. Алматы, ул. Абая 150.\n"
+        f"📍 Адрес: {CLINIC_CITY}, {CLINIC_ADDRESS}.\n"
         f"👨‍⚕️ Врач: <b>{doc_name}</b>\n"
         f"🕒 Время: <b>{time_slot}</b>\n"
         f"📱 Ваш телефон: <b>{phone}</b>\n\n"
@@ -572,7 +560,6 @@ async def callback_back_to_docs(call):
     await bot.answer_callback_query(call.id)
 
 
-# Обработка отмены записи со стороны администратора
 @bot.callback_query_handler(func=lambda call: call.data.startswith("adm_cancel_"))
 async def callback_admin_cancel(call):
     admin_chat_id = call.message.chat.id
@@ -596,7 +583,6 @@ async def callback_admin_cancel(call):
     time_slot = removed_data["time"]
     patient_chat_id = booking_info["user_id"]
 
-    # 🔄 УВЕДОМЛЯЕМ CRM (1С) ОБ ОТМЕНЕ ВИЗИТА
     await sync_cancel_booking_in_crm(doctor, time_slot)
 
     await bot.answer_callback_query(call.id, "✅ Запись отменена, слот снова свободен!")
@@ -619,7 +605,7 @@ async def callback_admin_cancel(call):
         parse_mode="HTML"
     )
 
-# 🎤 ОБРАБОТКА ГОЛОСОВЫХ СООБЩЕНИЙ
+
 @bot.message_handler(content_types=["voice"])
 async def handle_voice(message):
     if not await check_mode_selected(message):
@@ -649,7 +635,7 @@ async def handle_voice(message):
                 model="whisper-large-v3-turbo",
                 temperature=0.0,
                 prompt=(
-                    "Стоматологическая клиника в Алматы. Русский и казахский языки: "
+                    f"Стоматологическая клиника в городе {CLINIC_CITY}. Русский и казахский языки: "
                     "тіс емдеу, кариес, пломба, канал, имплант, қаптама, винир, брекет, "
                     "бағасы қанша, мекенжай, жазылу."
                 )
@@ -694,13 +680,13 @@ async def handle_voice(message):
             except Exception:
                 pass
 
-# 🤖 ОБЫЧНЫЕ ТЕКСТОВЫЕ ВОПРОСЫ К ИИ (ВСЕГДА СТРОГО В САМОМ НИЗУ ФАЙЛА!)
+
 @bot.message_handler(
     func=lambda msg: msg.text not in MENU_BUTTONS,
     content_types=["text"]
 )
 async def handle_text(message):
-    print(f"📥 Сработал текстовый хендлер для сообщения: {message.text}")
+    print(f"📥 Сработал текстовый хендлер для чата {message.chat.id}")
 
     if not await check_mode_selected(message):
         return

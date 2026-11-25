@@ -1,10 +1,16 @@
-# dental_data.py — Статический справочник клиники (адрес, график, прайс)
+from config import (
+    CLINIC_NAME,
+    CLINIC_CITY,
+    CLINIC_ADDRESS,
+    CLINIC_WORK_HOURS,
+    CLINIC_PHONE,
+)
 
 CLINIC_INFO = {
-    "name": "🦷 Стоматология «Digital Clinic.dent»",
-    "address": "📍 Наш адрес: ул. Абая 150, угол ул. Сатпаева (1 этаж)",
-    "work_hours": "🕒 График работы:\nПн-Сб: 09:00 – 20:00 (по записи)\nВс: Выходной",
-    "phone": "📞 Телефон для связи: +7 (777) 123-45-67"
+    "name": f"🦷 {CLINIC_NAME}",
+    "address": f"📍 Наш адрес: {CLINIC_CITY}, {CLINIC_ADDRESS}",
+    "work_hours": f"🕒 График работы:\n{CLINIC_WORK_HOURS}",
+    "phone": f"📞 Телефон для связи: {CLINIC_PHONE}",
 }
 
 SERVICES_TEXT = (
