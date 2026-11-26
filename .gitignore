@@ -8,3 +8,7 @@ chroma_db/
 *.sqlite
 *.sqlite3
 clinic.db
+*.db-wal
+*.db-shm
+*.py[cod]
+.idea/
