@@ -1,12 +1,14 @@
 import asyncio
 import time
-from config import client, MODES, user_histories, user_modes
+from config import bot, client, MODES, user_histories, user_modes, OPS_ALERT_CHAT_ID, CLINIC_PHONE
 from rag_service import init_vector_db, search_knowledge
 from utils import now_almaty
 
 _vector_db_initialized = False
 _warmup_done = False
 _warmup_lock = asyncio.Lock()
+_last_groq_alert_ts = 0.0
+_GROQ_ALERT_COOLDOWN_SEC = 300.0
 
 
 def ensure_vector_db():
@@ -92,11 +94,33 @@ async def warmup_ai_services():
             print(f"⚠️ Прогрев прошёл с предупреждением (бот продолжит работу): {e!r}")
 
 
+async def _notify_groq_outage(chat_id, last_error):
+    """Отправляет алерт о сбое всех моделей Groq с кулдауном раз в 5 минут."""
+    global _last_groq_alert_ts
+    if not OPS_ALERT_CHAT_ID:
+        return
+    now = time.monotonic()
+    if now - _last_groq_alert_ts < _GROQ_ALERT_COOLDOWN_SEC:
+        return
+    _last_groq_alert_ts = now
+    try:
+        safe_err = str(last_error or "unknown error")[:200]
+        await bot.send_message(
+            OPS_ALERT_CHAT_ID,
+            f"🚨 <b>Алерт ИИ (Groq):</b> все модели не ответили при обращении из чата <code>{chat_id}</code>.\n"
+            f"Причина: <code>{safe_err}</code>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        print(f"⚠️ Не удалось отправить алерт о сбое Groq: {e}")
+
+
 async def ask_ai(chat_id, user_text):
     """Асинхронный RAG-запрос в Groq с контекстом ChromaDB и мгновенным переключением моделей."""
     if not MODELS:
         await initialize_ai_models()
     if not MODELS:
+        await _notify_groq_outage(chat_id, "MODELS list is empty")
         return "Не удалось загрузить список моделей Groq. Проверь интернет или API_KEY!"
 
     loop = asyncio.get_running_loop()
@@ -126,7 +150,8 @@ async def ask_ai(chat_id, user_text):
         "🛑 Напоминание: отвечай тепло, чётко и по делу (без лишней воды), всегда дописывай мысль до конца "
         "и не обрывай слова/фразы. Понимай русский, казахский и смешанную речь, отвечая на языке основного "
         "обращения пациента. Не записывай через чат (только кнопка «📅 Записаться»), не выводи простыни "
-        "со списком врачей и слотов, не назначай скидки/подарки сам — направляй на ресепшн по номеру +7 (777) 123-45-67."
+        "со списком врачей и слотов, не назначай скидки/подарки сам — направляй на ресепшн по номеру "
+        f"{CLINIC_PHONE}."
     )
 
     if chat_id not in user_histories:
@@ -182,6 +207,7 @@ async def ask_ai(chat_id, user_text):
             continue
 
     print(f"❌ Критическая ошибка: все модели Groq недоступны. Последняя ошибка: {last_error}")
+    await _notify_groq_outage(chat_id, last_error)
     return "Извините, система консультаций сейчас немного перегружена. Пожалуйста, повторите запрос через пару секунд!"
 
 

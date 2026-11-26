@@ -16,6 +16,9 @@ client = Groq(api_key=API_KEY)
 admin_ids_raw = os.getenv("ADMIN_IDS", "6849157753")
 ADMIN_IDS = [int(admin_id.strip()) for admin_id in admin_ids_raw.split(",") if admin_id.strip().isdigit()]
 
+_ops_raw = (os.getenv("OPS_ALERT_CHAT_ID") or "").strip()
+OPS_ALERT_CHAT_ID = int(_ops_raw) if _ops_raw.isdigit() else (ADMIN_IDS[0] if ADMIN_IDS else None)
+
 # Профиль клиники (White-Label): легко переопределяется через .env под любого клиента
 CLINIC_NAME = os.getenv("CLINIC_NAME", "Стоматология «Digital Clinic.dent»")
 CLINIC_CITY = os.getenv("CLINIC_CITY", "г. Алматы")
